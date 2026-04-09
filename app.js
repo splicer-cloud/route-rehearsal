@@ -55,6 +55,7 @@ saveApiKeyButton.addEventListener("click", () => {
 
   saveGoogleMapsApiKey(apiKey);
   updateStreetViewKeyStatus();
+  streetViewSummary.textContent = "Google Maps key saved in this browser.";
 
   if (currentRouteContext) {
     renderStreetViewPoints(currentRouteContext);
@@ -82,8 +83,8 @@ locateButton.addEventListener("click", async () => {
     nearbySummary.textContent = "Checking your area for a few nearby destinations.";
 
     const [locationResult, nearbyPlacesResult] = await Promise.allSettled([
-      getLocationLabel(latitude, longitude),
-      getNearbyPlaces(latitude, longitude),
+      getLocationLabelForPoint(latitude, longitude),
+      getNearbyPlacesForPoint(latitude, longitude),
     ]);
 
     if (locationResult.status === "fulfilled") {
@@ -225,6 +226,18 @@ async function getLocationLabel(latitude, longitude) {
   return data.display_name || "My current location";
 }
 
+async function getLocationLabelForPoint(latitude, longitude) {
+  if (hasGoogleMapsApiKey()) {
+    try {
+      return await getGoogleLocationLabel(latitude, longitude);
+    } catch (error) {
+      return getLocationLabel(latitude, longitude);
+    }
+  }
+
+  return getLocationLabel(latitude, longitude);
+}
+
 async function getNearbyPlaces(latitude, longitude) {
   const query = `
     [out:json][timeout:20];
@@ -293,6 +306,18 @@ async function getNearbyPlaces(latitude, longitude) {
         ) === index,
     )
     .slice(0, 8);
+}
+
+async function getNearbyPlacesForPoint(latitude, longitude) {
+  if (hasGoogleMapsApiKey()) {
+    try {
+      return await getGoogleNearbyPlaces(latitude, longitude);
+    } catch (error) {
+      return getNearbyPlaces(latitude, longitude);
+    }
+  }
+
+  return getNearbyPlaces(latitude, longitude);
 }
 
 function fillSuggestions(locationLabel, nearbyPlaces) {
@@ -392,6 +417,14 @@ async function resolvePlace(query) {
     };
   }
 
+  if (hasGoogleMapsApiKey()) {
+    try {
+      return await getGooglePlace(query);
+    } catch (error) {
+      // Fall through to open lookup.
+    }
+  }
+
   const searchUrl = new URL("https://nominatim.openstreetmap.org/search");
 
   searchUrl.searchParams.set("format", "jsonv2");
@@ -419,6 +452,18 @@ async function resolvePlace(query) {
 }
 
 async function getRoute(startPlace, destinationPlace) {
+  if (hasGoogleMapsApiKey()) {
+    try {
+      return await getGoogleRoute(startPlace, destinationPlace);
+    } catch (error) {
+      return getOpenRoute(startPlace, destinationPlace);
+    }
+  }
+
+  return getOpenRoute(startPlace, destinationPlace);
+}
+
+async function getOpenRoute(startPlace, destinationPlace) {
   const routeUrl = new URL(
     `https://router.project-osrm.org/route/v1/driving/${startPlace.longitude},${startPlace.latitude};${destinationPlace.longitude},${destinationPlace.latitude}`,
   );
@@ -441,6 +486,34 @@ async function getRoute(startPlace, destinationPlace) {
   }
 
   return route;
+}
+
+async function getGoogleRoute(startPlace, destinationPlace) {
+  await ensureGoogleMapsLoaded();
+  const routesLibrary = await window.google.maps.importLibrary("routes");
+  const { DirectionsService } = routesLibrary;
+  const directionsService = new DirectionsService();
+  const response = await directionsService.route({
+    origin: {
+      location: {
+        lat: startPlace.latitude,
+        lng: startPlace.longitude,
+      },
+    },
+    destination: {
+      location: {
+        lat: destinationPlace.latitude,
+        lng: destinationPlace.longitude,
+      },
+    },
+    travelMode: window.google.maps.TravelMode.DRIVING,
+  });
+
+  if (!response?.routes?.[0]) {
+    throw new Error("Google could not build a driving route for those places.");
+  }
+
+  return normalizeGoogleRoute(response.routes[0], startPlace, destinationPlace);
 }
 
 function renderRoute(route, startPlace, destinationPlace) {
@@ -561,6 +634,10 @@ function selectRehearsalSteps(steps) {
 }
 
 function buildStepInstruction(step, destinationPlace, index, totalSteps) {
+  if (step.rawInstruction) {
+    return step.rawInstruction;
+  }
+
   const type = step.maneuver?.type || "continue";
   const modifier = step.maneuver?.modifier || "";
   const roadName = step.name || "the road ahead";
@@ -857,8 +934,10 @@ function clearGoogleMapsApiKey() {
 }
 
 function updateStreetViewKeyStatus() {
-  streetViewKeyStatus.textContent = loadGoogleMapsApiKey()
-    ? "Google Maps key saved in this browser. Street View is ready to try."
+  const apiKey = loadGoogleMapsApiKey();
+
+  streetViewKeyStatus.textContent = apiKey
+    ? `Google Maps key saved in this browser (ends in ${apiKey.slice(-4)}).`
     : "Save a browser-restricted Google Maps API key to turn on Street View.";
 }
 
@@ -1063,7 +1142,7 @@ function ensureGoogleMapsLoaded() {
   googleMapsLoaderPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
 
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&libraries=places`;
     script.async = true;
     script.defer = true;
     script.onload = () => resolve();
@@ -1086,6 +1165,201 @@ function setEmptyStreetViewMessage(message) {
   streetViewStage.classList.add("is-empty");
   streetViewStage.innerHTML = `<p class="placeholder-copy">${message}</p>`;
   streetViewPanorama = null;
+}
+
+async function getGoogleLocationLabel(latitude, longitude) {
+  await ensureGoogleMapsLoaded();
+  const geocodingLibrary = await window.google.maps.importLibrary("geocoding");
+  const { Geocoder } = geocodingLibrary;
+  const geocoder = new Geocoder();
+  const response = await geocoder.geocode({
+    location: {
+      lat: latitude,
+      lng: longitude,
+    },
+  });
+  const firstResult = response.results?.[0];
+
+  if (!firstResult) {
+    throw new Error("Google could not label this location.");
+  }
+
+  return firstResult.formatted_address;
+}
+
+async function getGooglePlace(query) {
+  await ensureGoogleMapsLoaded();
+  const geocodingLibrary = await window.google.maps.importLibrary("geocoding");
+  const { Geocoder } = geocodingLibrary;
+  const geocoder = new Geocoder();
+  const response = await geocoder.geocode({
+    address: query,
+  });
+  const firstResult = response.results?.[0];
+  const location = firstResult?.geometry?.location;
+
+  if (!firstResult || !location) {
+    throw new Error(`Google could not find "${query}".`);
+  }
+
+  return {
+    name: firstResult.formatted_address,
+    latitude: location.lat(),
+    longitude: location.lng(),
+  };
+}
+
+async function getGoogleNearbyPlaces(latitude, longitude) {
+  await ensureGoogleMapsLoaded();
+  const placesLibrary = await window.google.maps.importLibrary("places");
+  const { Place, SearchNearbyRankPreference } = placesLibrary;
+  const response = await Place.searchNearby({
+    fields: ["displayName", "formattedAddress", "location"],
+    locationRestriction: {
+      center: {
+        lat: latitude,
+        lng: longitude,
+      },
+      radius: nearbySearchRadiusMeters,
+    },
+    includedPrimaryTypes: [
+      "doctor",
+      "hospital",
+      "pharmacy",
+      "grocery_store",
+      "restaurant",
+      "school",
+      "park",
+      "parking",
+    ],
+    maxResultCount: 8,
+    rankPreference: SearchNearbyRankPreference.DISTANCE,
+  });
+  const places = response?.places ?? [];
+
+  return places
+    .map((place) => ({
+      name: place.displayName?.text || place.displayName || "",
+      latitude: place.location?.lat(),
+      longitude: place.location?.lng(),
+      distance: calculateDistanceMeters(
+        latitude,
+        longitude,
+        place.location?.lat(),
+        place.location?.lng(),
+      ),
+    }))
+    .filter((place) => place.name && place.latitude != null && place.longitude != null)
+    .slice(0, 8);
+}
+
+function normalizeGoogleRoute(route, startPlace, destinationPlace) {
+  const leg = route.legs?.[0];
+  const normalizedSteps = (leg?.steps ?? []).map((step, index, steps) => {
+    const location = step.start_location;
+
+    return {
+      distance: step.distance?.value ?? 0,
+      rawInstruction: stripHtml(step.instructions || ""),
+      maneuver: {
+        type: normalizeGoogleManeuver(step.maneuver, index, steps.length),
+        modifier: normalizeGoogleModifier(step.maneuver),
+        location: [location.lng(), location.lat()],
+      },
+      name: extractRoadName(step.instructions || ""),
+    };
+  });
+
+  normalizedSteps.push({
+    distance: 0,
+    rawInstruction: `Arrive near ${shortPlaceName(destinationPlace.name)}.`,
+    maneuver: {
+      type: "arrive",
+      modifier: "",
+      location: [destinationPlace.longitude, destinationPlace.latitude],
+    },
+    name: shortPlaceName(destinationPlace.name),
+  });
+
+  return {
+    distance: leg?.distance?.value ?? 0,
+    duration: leg?.duration?.value ?? 0,
+    geometry: {
+      coordinates: (route.overview_path ?? []).map((point) => [
+        point.lng(),
+        point.lat(),
+      ]),
+    },
+    legs: [
+      {
+        steps: normalizedSteps,
+      },
+    ],
+    startAddress: leg?.start_address ?? startPlace.name,
+    endAddress: leg?.end_address ?? destinationPlace.name,
+  };
+}
+
+function stripHtml(value) {
+  const temporaryElement = document.createElement("div");
+
+  temporaryElement.innerHTML = value;
+  return temporaryElement.textContent?.replace(/\s+/g, " ").trim() || "";
+}
+
+function normalizeGoogleManeuver(maneuver, index, stepCount) {
+  if (!maneuver && index === stepCount - 1) {
+    return "arrive";
+  }
+
+  if (!maneuver) {
+    return "continue";
+  }
+
+  if (maneuver.startsWith("turn-")) {
+    return "turn";
+  }
+
+  if (maneuver.includes("merge")) {
+    return "merge";
+  }
+
+  if (maneuver.includes("fork")) {
+    return "fork";
+  }
+
+  if (maneuver.includes("ramp")) {
+    return maneuver.includes("exit") ? "off ramp" : "on ramp";
+  }
+
+  if (maneuver.includes("roundabout")) {
+    return "roundabout";
+  }
+
+  if (maneuver === "straight") {
+    return "continue";
+  }
+
+  return maneuver;
+}
+
+function normalizeGoogleModifier(maneuver) {
+  if (!maneuver || !maneuver.includes("-")) {
+    return "";
+  }
+
+  return maneuver.split("-").slice(1).join(" ");
+}
+
+function extractRoadName(instruction) {
+  const plainInstruction = stripHtml(instruction);
+  const match = plainInstruction.match(/(?:onto|toward|to stay on)\s(.+?)(?:\.|$)/i);
+
+  return match?.[1] || "the road ahead";
+}
+
+function hasGoogleMapsApiKey() {
+  return Boolean(loadGoogleMapsApiKey());
 }
 
 function calculateBearing(lat1, lon1, lat2, lon2) {
