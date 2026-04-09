@@ -143,6 +143,11 @@ button:hover {
   background: #f7ecdf;
 }
 
+.suggestion-chip.is-muted {
+  background: #f5efe8;
+  color: var(--muted);
+}
+
 .result-header {
   margin-bottom: 18px;
 }
@@ -169,6 +174,41 @@ button:hover {
 .route-steps {
   display: grid;
   gap: 12px;
+}
+
+.street-view-settings {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.street-view-key-row {
+  display: grid;
+  gap: 10px;
+}
+
+.street-view-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.street-view-stage {
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(201, 111, 74, 0.12), rgba(30, 41, 59, 0.05)),
+    #f7f1ea;
+}
+
+.street-view-stage.is-empty {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
 }
 
 .placeholder-copy {
@@ -208,6 +248,13 @@ button:hover {
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
   background: #fffaf3;
+}
+
+@media (min-width: 720px) {
+  .street-view-key-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
 }
 
 .result p:last-child {

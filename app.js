@@ -11,6 +11,12 @@ const routeMapElement = document.querySelector("#route-map");
 const routeSteps = document.querySelector("#route-steps");
 const routeSummary = document.querySelector("#route-summary");
 const submitButton = form.querySelector('button[type="submit"]');
+const streetViewSummary = document.querySelector("#street-view-summary");
+const streetViewPoints = document.querySelector("#street-view-points");
+const streetViewStage = document.querySelector("#street-view-stage");
+const googleMapsApiKeyInput = document.querySelector("#google-maps-api-key");
+const saveApiKeyButton = document.querySelector("#save-api-key");
+const streetViewKeyStatus = document.querySelector("#street-view-key-status");
 
 const nearbySearchRadiusMeters = 1800;
 const overpassEndpoints = [
@@ -19,15 +25,41 @@ const overpassEndpoints = [
   "https://overpass.kumi.systems/api/interpreter",
 ];
 const locationStorageKey = "route-rehearsal:last-location";
+const googleMapsApiKeyStorageKey = "route-rehearsal:google-maps-api-key";
 
 let currentLocation = null;
 let routeMap = null;
 let routeLayer = null;
 let routeMarkers = [];
 const knownPlaces = new Map();
+let currentRouteContext = null;
+let streetViewPanorama = null;
+let googleMapsLoaderPromise = null;
 
 initializeRouteMap();
 restoreSavedLocation();
+restoreGoogleMapsApiKey();
+updateStreetViewKeyStatus();
+
+saveApiKeyButton.addEventListener("click", () => {
+  const apiKey = googleMapsApiKeyInput.value.trim();
+
+  if (!apiKey) {
+    clearGoogleMapsApiKey();
+    updateStreetViewKeyStatus();
+    setEmptyStreetViewMessage(
+      "Street View is waiting for a Google Maps API key.",
+    );
+    return;
+  }
+
+  saveGoogleMapsApiKey(apiKey);
+  updateStreetViewKeyStatus();
+
+  if (currentRouteContext) {
+    renderStreetViewPoints(currentRouteContext);
+  }
+});
 
 locateButton.addEventListener("click", async () => {
   if (!navigator.geolocation) {
@@ -119,6 +151,8 @@ form.addEventListener("submit", async (event) => {
       drawFallbackMap(startPlace, destinationPlace);
     }
 
+    currentRouteContext = null;
+    renderStreetViewPoints(null);
     routeSummary.textContent =
       error.message ||
       "We could not build this route yet. Please try a slightly more specific place name.";
@@ -418,6 +452,14 @@ function renderRoute(route, startPlace, destinationPlace) {
 
   drawRouteMap(route, startPlace, destinationPlace);
   renderRehearsalSteps(rehearsalSteps, destinationPlace);
+
+  currentRouteContext = {
+    route,
+    startPlace,
+    destinationPlace,
+    rehearsalSteps,
+  };
+  renderStreetViewPoints(currentRouteContext);
 }
 
 function drawRouteMap(route, startPlace, destinationPlace) {
@@ -780,6 +822,288 @@ function restoreSavedLocation() {
   locationStatus.textContent = "Using your last saved location until you refresh it.";
 }
 
+function restoreGoogleMapsApiKey() {
+  const savedApiKey = loadGoogleMapsApiKey();
+
+  if (!savedApiKey) {
+    return;
+  }
+
+  googleMapsApiKeyInput.value = savedApiKey;
+}
+
+function saveGoogleMapsApiKey(apiKey) {
+  try {
+    window.localStorage.setItem(googleMapsApiKeyStorageKey, apiKey);
+  } catch (error) {
+    return;
+  }
+}
+
+function loadGoogleMapsApiKey() {
+  try {
+    return window.localStorage.getItem(googleMapsApiKeyStorageKey) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function clearGoogleMapsApiKey() {
+  try {
+    window.localStorage.removeItem(googleMapsApiKeyStorageKey);
+  } catch (error) {
+    return;
+  }
+}
+
+function updateStreetViewKeyStatus() {
+  streetViewKeyStatus.textContent = loadGoogleMapsApiKey()
+    ? "Google Maps key saved in this browser. Street View is ready to try."
+    : "Save a browser-restricted Google Maps API key to turn on Street View.";
+}
+
+function renderStreetViewPoints(routeContext) {
+  streetViewPoints.innerHTML = "";
+
+  if (!routeContext) {
+    streetViewSummary.textContent =
+      "Once a route is ready, we can preview a few points along it with Google Street View.";
+    setEmptyStreetViewMessage(
+      "Street View will appear here once a route and key are ready.",
+    );
+    streetViewPoints.innerHTML = `
+      <p class="placeholder-copy">
+        Build a route first, then we will offer start, midpoint, and arrival previews.
+      </p>
+    `;
+    return;
+  }
+
+  const previewPoints = buildStreetViewPoints(routeContext);
+  const hasApiKey = Boolean(loadGoogleMapsApiKey());
+
+  streetViewSummary.textContent = hasApiKey
+    ? "Choose a route moment to try a Google Street View preview there."
+    : "Route moments are ready. Save a browser-restricted Google Maps API key to preview them in Street View.";
+
+  previewPoints.forEach((point, index) => {
+    const chip = document.createElement("button");
+
+    chip.type = "button";
+    chip.className = hasApiKey ? "suggestion-chip" : "suggestion-chip is-muted";
+    chip.textContent = point.label;
+    chip.disabled = !hasApiKey;
+    chip.addEventListener("click", () => {
+      loadStreetViewPoint(point, index === previewPoints.length - 1);
+    });
+    streetViewPoints.append(chip);
+  });
+
+  if (!hasApiKey) {
+    setEmptyStreetViewMessage(
+      "Add a Google Maps API key above, then choose a route moment to load Street View.",
+    );
+    return;
+  }
+
+  setEmptyStreetViewMessage(
+    "Choose a route moment above to load a Street View preview.",
+  );
+}
+
+function buildStreetViewPoints(routeContext) {
+  const { route, startPlace, destinationPlace, rehearsalSteps } = routeContext;
+  const routeCoordinates = route.geometry?.coordinates ?? [];
+  const midpointCoordinate =
+    routeCoordinates[Math.floor(routeCoordinates.length / 2)] || [
+      destinationPlace.longitude,
+      destinationPlace.latitude,
+    ];
+  const midpointStep =
+    rehearsalSteps[Math.floor(rehearsalSteps.length / 2)] || rehearsalSteps[0];
+  const arrivalStep = rehearsalSteps[rehearsalSteps.length - 1];
+  const points = [
+    {
+      label: "Start view",
+      latitude: startPlace.latitude,
+      longitude: startPlace.longitude,
+      headingTarget: midpointCoordinate,
+      title: `Starting near ${shortPlaceName(startPlace.name)}`,
+    },
+    {
+      label: midpointStep ? "Midpoint view" : "Route view",
+      latitude: midpointStep
+        ? midpointStep.maneuver.location[1]
+        : midpointCoordinate[1],
+      longitude: midpointStep
+        ? midpointStep.maneuver.location[0]
+        : midpointCoordinate[0],
+      headingTarget: arrivalStep?.maneuver?.location || [
+        destinationPlace.longitude,
+        destinationPlace.latitude,
+      ],
+      title: midpointStep
+        ? buildStepInstruction(
+            midpointStep,
+            destinationPlace,
+            1,
+            rehearsalSteps.length,
+          )
+        : `Looking ahead toward ${shortPlaceName(destinationPlace.name)}`,
+    },
+    {
+      label: "Arrival view",
+      latitude: arrivalStep
+        ? arrivalStep.maneuver.location[1]
+        : destinationPlace.latitude,
+      longitude: arrivalStep
+        ? arrivalStep.maneuver.location[0]
+        : destinationPlace.longitude,
+      headingTarget: [
+        destinationPlace.longitude,
+        destinationPlace.latitude,
+      ],
+      title: `Arriving near ${shortPlaceName(destinationPlace.name)}`,
+    },
+  ];
+
+  return points;
+}
+
+async function loadStreetViewPoint(point, isArrival) {
+  streetViewSummary.textContent = `Loading Street View for ${point.label.toLowerCase()}...`;
+  setEmptyStreetViewMessage("Loading Street View...");
+
+  try {
+    await ensureGoogleMapsLoaded();
+    const streetViewLibrary = await window.google.maps.importLibrary("streetView");
+    const { StreetViewService, StreetViewPanorama } = streetViewLibrary;
+    const streetViewService = new StreetViewService();
+    const pointLocation = {
+      lat: point.latitude,
+      lng: point.longitude,
+    };
+
+    const panoramaData = await new Promise((resolve, reject) => {
+      streetViewService.getPanorama(
+        {
+          location: pointLocation,
+          radius: isArrival ? 80 : 50,
+        },
+        (data, status) => {
+          if (status === window.google.maps.StreetViewStatus.OK) {
+            resolve(data);
+            return;
+          }
+
+          reject(new Error("No nearby Street View imagery was found."));
+        },
+      );
+    });
+
+    streetViewStage.classList.remove("is-empty");
+
+    if (!streetViewPanorama) {
+      streetViewStage.innerHTML = "";
+      streetViewPanorama = new StreetViewPanorama(streetViewStage, {
+        addressControl: false,
+        fullscreenControl: false,
+        motionTracking: false,
+        motionTrackingControl: false,
+        showRoadLabels: true,
+        zoomControl: true,
+      });
+    }
+
+    const panoramaLocation = panoramaData.location.latLng;
+    const heading = point.headingTarget
+      ? calculateBearing(
+          panoramaLocation.lat(),
+          panoramaLocation.lng(),
+          point.headingTarget[1],
+          point.headingTarget[0],
+        )
+      : 0;
+
+    streetViewPanorama.setPano(panoramaData.location.pano);
+    streetViewPanorama.setPov({
+      heading,
+      pitch: 0,
+    });
+    streetViewPanorama.setZoom(0);
+
+    streetViewSummary.textContent = point.title;
+  } catch (error) {
+    streetViewSummary.textContent =
+      error.message ||
+      "Street View could not load for this point right now.";
+    setEmptyStreetViewMessage(
+      "Street View did not load for this point. Try another point or check the API key restrictions.",
+    );
+  }
+}
+
+function ensureGoogleMapsLoaded() {
+  if (window.google?.maps) {
+    return Promise.resolve();
+  }
+
+  if (googleMapsLoaderPromise) {
+    return googleMapsLoaderPromise;
+  }
+
+  const apiKey = loadGoogleMapsApiKey();
+
+  if (!apiKey) {
+    return Promise.reject(
+      new Error("A Google Maps API key is required for Street View."),
+    );
+  }
+
+  googleMapsLoaderPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => {
+      googleMapsLoaderPromise = null;
+      reject(
+        new Error(
+          "Google Maps failed to load. Check that the API key is valid and browser-restricted for this site.",
+        ),
+      );
+    };
+
+    document.head.append(script);
+  });
+
+  return googleMapsLoaderPromise;
+}
+
+function setEmptyStreetViewMessage(message) {
+  streetViewStage.classList.add("is-empty");
+  streetViewStage.innerHTML = `<p class="placeholder-copy">${message}</p>`;
+  streetViewPanorama = null;
+}
+
+function calculateBearing(lat1, lon1, lat2, lon2) {
+  const startLatitude = toRadians(lat1);
+  const startLongitude = toRadians(lon1);
+  const endLatitude = toRadians(lat2);
+  const endLongitude = toRadians(lon2);
+  const longitudeDelta = endLongitude - startLongitude;
+  const y = Math.sin(longitudeDelta) * Math.cos(endLatitude);
+  const x =
+    Math.cos(startLatitude) * Math.sin(endLatitude) -
+    Math.sin(startLatitude) *
+      Math.cos(endLatitude) *
+      Math.cos(longitudeDelta);
+
+  return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+}
+
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
   const earthRadius = 6371000;
   const latitudeDelta = toRadians(lat2 - lat1);
@@ -797,4 +1121,8 @@ function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
 
 function toRadians(value) {
   return (value * Math.PI) / 180;
+}
+
+function toDegrees(value) {
+  return (value * 180) / Math.PI;
 }

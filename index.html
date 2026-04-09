@@ -86,6 +86,51 @@
           </p>
         </div>
       </section>
+
+      <section class="card street-view-card">
+        <div class="result-header">
+          <div>
+            <h2>Street-Level Preview</h2>
+            <p id="street-view-summary">
+              Once a route is ready, we can preview a few points along it with Google Street View.
+            </p>
+          </div>
+        </div>
+
+        <div class="street-view-settings">
+          <label for="google-maps-api-key">Google Maps API key</label>
+          <div class="street-view-key-row">
+            <input
+              id="google-maps-api-key"
+              type="password"
+              placeholder="Paste a browser-restricted API key"
+              autocomplete="off"
+            />
+            <button type="button" class="secondary-button" id="save-api-key">
+              Save key
+            </button>
+          </div>
+          <p class="status" id="street-view-key-status">
+            Save a browser-restricted Google Maps API key to turn on Street View.
+          </p>
+        </div>
+
+        <div class="street-view-points" id="street-view-points">
+          <p class="placeholder-copy">
+            Build a route first, then we will offer start, midpoint, and arrival previews.
+          </p>
+        </div>
+
+        <div
+          class="street-view-stage is-empty"
+          id="street-view-stage"
+          aria-label="Street View preview"
+        >
+          <p class="placeholder-copy">
+            Street View will appear here once a route and key are ready.
+          </p>
+        </div>
+      </section>
     </main>
 
     <script
