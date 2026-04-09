@@ -33,6 +33,7 @@ const overpassEndpoints = [
 ];
 const locationStorageKey = "route-rehearsal:last-location";
 const googleMapsApiKeyStorageKey = "route-rehearsal:google-maps-api-key";
+const latestRouteStorageKey = "route-rehearsal:latest-route";
 
 let currentLocation = null;
 let routeMap = null;
@@ -569,6 +570,7 @@ function renderRoute(route, startPlace, destinationPlace) {
     destinationPlace,
     rehearsalSteps,
   };
+  saveLatestRoutePayload(currentRouteContext);
   loadDriveLabRoute(route, startPlace, destinationPlace);
 
   try {
@@ -1269,6 +1271,17 @@ function loadGoogleMapsApiKey() {
 function clearGoogleMapsApiKey() {
   try {
     window.localStorage.removeItem(googleMapsApiKeyStorageKey);
+  } catch (error) {
+    return;
+  }
+}
+
+function saveLatestRoutePayload(routeContext) {
+  try {
+    window.localStorage.setItem(
+      latestRouteStorageKey,
+      JSON.stringify(routeContext),
+    );
   } catch (error) {
     return;
   }

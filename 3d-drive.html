@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Route Rehearsal 3D Drive</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://ajax.googleapis.com/ajax/libs/cesiumjs/1.105/Build/Cesium/Cesium.js"></script>
+    <link
+      href="https://ajax.googleapis.com/ajax/libs/cesiumjs/1.105/Build/Cesium/Widgets/widgets.css"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <main class="page page-wide">
+      <section class="hero">
+        <p class="eyebrow">Version 2 lab</p>
+        <h1>3D Drive Prototype</h1>
+        <p class="intro">
+          This page is our first real attempt at a smooth drive-through feel
+          using Google Photorealistic 3D Tiles and a route-following camera.
+        </p>
+        <p class="hero-link-row">
+          <a class="hero-link" href="index.html">Back to Route Rehearsal</a>
+        </p>
+      </section>
+
+      <section class="card three-drive-layout">
+        <div class="three-drive-sidebar">
+          <h2>Setup</h2>
+          <label for="tiles-api-key">Google Maps API key</label>
+          <input
+            id="tiles-api-key"
+            type="password"
+            placeholder="Use a key with Map Tiles API enabled"
+            autocomplete="off"
+          />
+          <button type="button" id="save-tiles-key">Save key</button>
+          <p class="status" id="tiles-key-status">
+            Paste a Google Maps key with Map Tiles API enabled.
+          </p>
+
+          <h2>Route</h2>
+          <p class="status" id="three-drive-route-status">
+            Return to the main app, build a route, then come back here.
+          </p>
+
+          <div class="drive-lab-controls">
+            <button type="button" id="three-drive-load-scene">Load 3D scene</button>
+            <button type="button" class="secondary-button" id="three-drive-play" disabled>
+              Play camera ride
+            </button>
+            <button type="button" class="secondary-button" id="three-drive-pause" disabled>
+              Pause
+            </button>
+            <button type="button" class="secondary-button" id="three-drive-reset" disabled>
+              Reset
+            </button>
+          </div>
+
+          <div class="drive-lab-meter">
+            <div class="drive-lab-progress-track">
+              <div
+                class="drive-lab-progress-bar"
+                id="three-drive-progress-bar"
+              ></div>
+            </div>
+            <p class="status" id="three-drive-playback-status">
+              The 3D ride is waiting for a loaded scene and route.
+            </p>
+          </div>
+
+          <h2>Notes</h2>
+          <p class="status">
+            This is the true smooth-motion path. Unlike Street View, it moves a
+            camera through a textured 3D mesh.
+          </p>
+          <p class="status">
+            It will be visually smoother, but less photo-accurate at street level.
+          </p>
+        </div>
+
+        <div class="three-drive-view-wrap">
+          <div class="three-drive-view" id="three-drive-view"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="3d-drive.js"></script>
+  </body>
+</html>
