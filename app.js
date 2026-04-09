@@ -41,11 +41,10 @@ const knownPlaces = new Map();
 let currentRouteContext = null;
 let streetViewPanorama = null;
 let googleMapsLoaderPromise = null;
-let driveLabPolyline = [];
-let driveLabAnimationFrame = null;
-let driveLabMarker = null;
+let driveLabFrames = [];
+let driveLabTimer = null;
 let driveLabProgress = 0;
-let driveLabLastTimestamp = 0;
+let driveLabFrameIndex = 0;
 let driveLabIsPlaying = false;
 
 initializeRouteMap();
@@ -576,11 +575,6 @@ function drawRouteMap(route, startPlace, destinationPlace) {
     throw new Error("The map could not load in this browser.");
   }
 
-  if (driveLabMarker) {
-    routeMap.removeLayer(driveLabMarker);
-    driveLabMarker = null;
-  }
-
   clearMapLayers();
 
   routeLayer = L.geoJSON(route.geometry, {
@@ -608,163 +602,121 @@ function drawRouteMap(route, startPlace, destinationPlace) {
 
 function loadDriveLabRoute(route, startPlace, destinationPlace) {
   pauseDriveLabPlayback();
-
-  if (driveLabMarker && routeMap) {
-    routeMap.removeLayer(driveLabMarker);
-    driveLabMarker = null;
-  }
-
-  const coordinates = route.geometry?.coordinates ?? [];
-
-  driveLabPolyline = coordinates.map(([longitude, latitude]) => ({
-    latitude,
-    longitude,
-  }));
-
-  if (!driveLabPolyline.length) {
-    driveLabPolyline = [
-      {
-        latitude: startPlace.latitude,
-        longitude: startPlace.longitude,
-      },
-      {
-        latitude: destinationPlace.latitude,
-        longitude: destinationPlace.longitude,
-      },
-    ];
-  }
+  driveLabFrames = buildDriveLabFrames(route, startPlace, destinationPlace);
 
   driveLabSummary.textContent =
-    "Press play to move through the route like a guided dry run.";
-  driveLabStatus.textContent = `Route loaded. Ready to preview ${formatDriveDistance(route.distance)} of route.`;
+    "Press play to step through the drive in Street View.";
+  driveLabStatus.textContent = `Route loaded. Ready to preview ${driveLabFrames.length} Street View moments.`;
   driveLabProgress = 0;
-  driveLabLastTimestamp = 0;
-  placeDriveLabMarkerAtProgress(0);
+  driveLabFrameIndex = 0;
+  driveLabProgressBar.style.width = "0%";
   updateDriveLabUi();
 }
 
 function clearDriveLabRoute() {
   pauseDriveLabPlayback();
-  driveLabPolyline = [];
+  driveLabFrames = [];
   driveLabProgress = 0;
-  driveLabLastTimestamp = 0;
-
-  if (driveLabMarker && routeMap) {
-    routeMap.removeLayer(driveLabMarker);
-    driveLabMarker = null;
-  }
+  driveLabFrameIndex = 0;
 
   driveLabSummary.textContent =
-    "This is our first step toward a real moving dry run. Build a route, then play it.";
+    "This is our first step toward a real moving dry run. Build a route, then play it through Street View.";
   driveLabStatus.textContent = "No route loaded yet.";
+  driveLabProgressBar.style.width = "0%";
   updateDriveLabUi();
 }
 
-function startDriveLabPlayback() {
-  if (!driveLabPolyline.length) {
+async function startDriveLabPlayback() {
+  if (!driveLabFrames.length) {
     return;
   }
 
-  if (driveLabProgress >= 1) {
+  if (!hasGoogleMapsApiKey()) {
+    driveLabStatus.textContent = "Add a Google Maps API key first so Street View can play.";
+    return;
+  }
+
+  if (driveLabFrameIndex >= driveLabFrames.length) {
+    driveLabFrameIndex = 0;
     driveLabProgress = 0;
-    placeDriveLabMarkerAtProgress(0);
   }
 
   driveLabIsPlaying = true;
-  driveLabStatus.textContent = "Driving the route preview...";
+  driveLabSummary.textContent = "Playing a Street View dry run of the route.";
+  driveLabStatus.textContent = "Starting Street View playback...";
   updateDriveLabUi();
-  driveLabAnimationFrame = window.requestAnimationFrame(stepDriveLabPlayback);
+  await playDriveLabFrame();
 }
 
 function pauseDriveLabPlayback() {
   driveLabIsPlaying = false;
 
-  if (driveLabAnimationFrame) {
-    window.cancelAnimationFrame(driveLabAnimationFrame);
-    driveLabAnimationFrame = null;
+  if (driveLabTimer) {
+    window.clearTimeout(driveLabTimer);
+    driveLabTimer = null;
   }
-
-  driveLabLastTimestamp = 0;
   updateDriveLabUi();
 }
 
-function resetDriveLabPlayback() {
+async function resetDriveLabPlayback() {
   pauseDriveLabPlayback();
   driveLabProgress = 0;
-  placeDriveLabMarkerAtProgress(0);
-  driveLabStatus.textContent = driveLabPolyline.length
+  driveLabFrameIndex = 0;
+  driveLabProgressBar.style.width = "0%";
+  driveLabStatus.textContent = driveLabFrames.length
     ? "Route reset and ready to play again."
     : "No route loaded yet.";
+  if (driveLabFrames.length) {
+    await loadStreetViewPoint(driveLabFrames[0], false);
+  }
   updateDriveLabUi();
 }
 
-function stepDriveLabPlayback(timestamp) {
+async function playDriveLabFrame() {
+  if (!driveLabIsPlaying || !driveLabFrames.length) {
+    return;
+  }
+
+  const frame = driveLabFrames[driveLabFrameIndex];
+  const lastFrameIndex = Math.max(driveLabFrames.length - 1, 1);
+
+  driveLabProgress = driveLabFrameIndex / lastFrameIndex;
+  driveLabProgressBar.style.width = `${Math.round(driveLabProgress * 100)}%`;
+  driveLabStatus.textContent = `Previewing ${frame.label.toLowerCase()}... ${Math.round(
+    driveLabProgress * 100,
+  )}%`;
+
+  const loaded = await loadStreetViewPoint(
+    frame,
+    driveLabFrameIndex === driveLabFrames.length - 1,
+  );
+
+  if (!loaded) {
+    driveLabStatus.textContent = "Street View playback hit a rough spot. Try again.";
+    pauseDriveLabPlayback();
+    return;
+  }
+
   if (!driveLabIsPlaying) {
     return;
   }
 
-  if (!driveLabLastTimestamp) {
-    driveLabLastTimestamp = timestamp;
-  }
-
-  const delta = timestamp - driveLabLastTimestamp;
-  const progressStep = delta / 18000;
-
-  driveLabLastTimestamp = timestamp;
-  driveLabProgress = Math.min(1, driveLabProgress + progressStep);
-  placeDriveLabMarkerAtProgress(driveLabProgress);
-  driveLabStatus.textContent = `Driving the route preview... ${Math.round(
-    driveLabProgress * 100,
-  )}%`;
-
-  if (driveLabProgress >= 1) {
+  if (driveLabFrameIndex >= driveLabFrames.length - 1) {
+    driveLabProgress = 1;
+    driveLabProgressBar.style.width = "100%";
+    driveLabStatus.textContent = "Street View dry run complete. Reset to watch again.";
     pauseDriveLabPlayback();
-    driveLabStatus.textContent = "Dry run complete. Reset to watch again.";
-    updateDriveLabUi();
     return;
   }
 
-  driveLabAnimationFrame = window.requestAnimationFrame(stepDriveLabPlayback);
-}
-
-function placeDriveLabMarkerAtProgress(progress) {
-  if (!driveLabPolyline.length || !routeMap) {
-    return;
-  }
-
-  const scaledIndex = (driveLabPolyline.length - 1) * progress;
-  const lowerIndex = Math.floor(scaledIndex);
-  const upperIndex = Math.min(driveLabPolyline.length - 1, lowerIndex + 1);
-  const mix = scaledIndex - lowerIndex;
-  const startPoint = driveLabPolyline[lowerIndex];
-  const endPoint = driveLabPolyline[upperIndex];
-  const point = {
-    latitude: interpolateValue(startPoint.latitude, endPoint.latitude, mix),
-    longitude: interpolateValue(startPoint.longitude, endPoint.longitude, mix),
-  };
-
-  if (!driveLabMarker) {
-    driveLabMarker = L.circleMarker([point.latitude, point.longitude], {
-      radius: 9,
-      color: "#1e293b",
-      weight: 2,
-      fillColor: "#c96f4a",
-      fillOpacity: 1,
-    }).addTo(routeMap);
-  } else {
-    driveLabMarker.setLatLng([point.latitude, point.longitude]);
-  }
-
-  routeMap.panTo([point.latitude, point.longitude], {
-    animate: true,
-    duration: 0.25,
-  });
-
-  driveLabProgressBar.style.width = `${Math.round(progress * 100)}%`;
+  driveLabFrameIndex += 1;
+  driveLabTimer = window.setTimeout(() => {
+    playDriveLabFrame();
+  }, 1800);
 }
 
 function updateDriveLabUi() {
-  const hasRoute = driveLabPolyline.length > 0;
+  const hasRoute = driveLabFrames.length > 0;
 
   drivePlayButton.disabled = !hasRoute || driveLabIsPlaying;
   drivePauseButton.disabled = !hasRoute || !driveLabIsPlaying;
@@ -777,6 +729,82 @@ function updateDriveLabUi() {
 
 function interpolateValue(start, end, amount) {
   return start + (end - start) * amount;
+}
+
+function buildDriveLabFrames(route, startPlace, destinationPlace) {
+  const routeCoordinates = route.geometry?.coordinates ?? [];
+  const sampledCoordinates = sampleRouteCoordinates(routeCoordinates, 8);
+  const frames = sampledCoordinates.map((coordinate, index, coordinates) => {
+    const nextCoordinate =
+      coordinates[Math.min(coordinates.length - 1, index + 1)] || [
+        destinationPlace.longitude,
+        destinationPlace.latitude,
+      ];
+
+    return {
+      label: streetViewFrameLabel(index, coordinates.length),
+      latitude: coordinate[1],
+      longitude: coordinate[0],
+      headingTarget: nextCoordinate,
+      title: streetViewFrameTitle(index, coordinates.length, startPlace, destinationPlace),
+    };
+  });
+
+  if (!frames.length) {
+    return buildStreetViewPoints({
+      route,
+      startPlace,
+      destinationPlace,
+      rehearsalSteps: [],
+    });
+  }
+
+  return frames;
+}
+
+function sampleRouteCoordinates(coordinates, sampleCount) {
+  if (!coordinates.length) {
+    return [];
+  }
+
+  if (coordinates.length <= sampleCount) {
+    return coordinates;
+  }
+
+  const samples = [];
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const progress = index / Math.max(sampleCount - 1, 1);
+    const coordinateIndex = Math.round((coordinates.length - 1) * progress);
+
+    samples.push(coordinates[coordinateIndex]);
+  }
+
+  return samples;
+}
+
+function streetViewFrameLabel(index, totalFrames) {
+  if (index === 0) {
+    return "Start";
+  }
+
+  if (index === totalFrames - 1) {
+    return "Arrival";
+  }
+
+  return `Frame ${index + 1}`;
+}
+
+function streetViewFrameTitle(index, totalFrames, startPlace, destinationPlace) {
+  if (index === 0) {
+    return `Leaving ${shortPlaceName(startPlace.name)}`;
+  }
+
+  if (index === totalFrames - 1) {
+    return `Arriving near ${shortPlaceName(destinationPlace.name)}`;
+  }
+
+  return `Moving along the route toward ${shortPlaceName(destinationPlace.name)}`;
 }
 
 function renderRehearsalSteps(steps, destinationPlace) {
@@ -1326,6 +1354,7 @@ async function loadStreetViewPoint(point, isArrival) {
     streetViewPanorama.setZoom(0);
 
     streetViewSummary.textContent = point.title;
+    return true;
   } catch (error) {
     streetViewSummary.textContent =
       error.message ||
@@ -1333,6 +1362,7 @@ async function loadStreetViewPoint(point, isArrival) {
     setEmptyStreetViewMessage(
       "Street View did not load for this point. Try another point or check the API key restrictions.",
     );
+    return false;
   }
 }
 
