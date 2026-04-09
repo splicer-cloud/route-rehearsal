@@ -704,6 +704,9 @@ function stepDriveLabPlayback(timestamp) {
   driveLabLastTimestamp = timestamp;
   driveLabProgress = Math.min(1, driveLabProgress + progressStep);
   placeDriveLabMarkerAtProgress(driveLabProgress);
+  driveLabStatus.textContent = `Driving the route preview... ${Math.round(
+    driveLabProgress * 100,
+  )}%`;
 
   if (driveLabProgress >= 1) {
     pauseDriveLabPlayback();
@@ -720,11 +723,16 @@ function placeDriveLabMarkerAtProgress(progress) {
     return;
   }
 
-  const index = Math.min(
-    driveLabPolyline.length - 1,
-    Math.round((driveLabPolyline.length - 1) * progress),
-  );
-  const point = driveLabPolyline[index];
+  const scaledIndex = (driveLabPolyline.length - 1) * progress;
+  const lowerIndex = Math.floor(scaledIndex);
+  const upperIndex = Math.min(driveLabPolyline.length - 1, lowerIndex + 1);
+  const mix = scaledIndex - lowerIndex;
+  const startPoint = driveLabPolyline[lowerIndex];
+  const endPoint = driveLabPolyline[upperIndex];
+  const point = {
+    latitude: interpolateValue(startPoint.latitude, endPoint.latitude, mix),
+    longitude: interpolateValue(startPoint.longitude, endPoint.longitude, mix),
+  };
 
   if (!driveLabMarker) {
     driveLabMarker = L.circleMarker([point.latitude, point.longitude], {
@@ -756,6 +764,10 @@ function updateDriveLabUi() {
   if (!hasRoute) {
     driveLabProgressBar.style.width = "0%";
   }
+}
+
+function interpolateValue(start, end, amount) {
+  return start + (end - start) * amount;
 }
 
 function renderRehearsalSteps(steps, destinationPlace) {
