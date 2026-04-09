@@ -23,6 +23,7 @@ const drivePauseButton = document.querySelector("#drive-pause");
 const driveResetButton = document.querySelector("#drive-reset");
 const driveLabProgressBar = document.querySelector("#drive-lab-progress-bar");
 const driveLabStatus = document.querySelector("#drive-lab-status");
+const driveSpeedSelect = document.querySelector("#drive-speed");
 
 const nearbySearchRadiusMeters = 1800;
 const overpassEndpoints = [
@@ -46,6 +47,7 @@ let driveLabTimer = null;
 let driveLabProgress = 0;
 let driveLabFrameIndex = 0;
 let driveLabIsPlaying = false;
+let lastStreetViewHeading = null;
 
 initializeRouteMap();
 restoreSavedLocation();
@@ -63,6 +65,16 @@ drivePauseButton.addEventListener("click", () => {
 
 driveResetButton.addEventListener("click", () => {
   resetDriveLabPlayback();
+});
+
+driveSpeedSelect.addEventListener("change", () => {
+  if (currentRouteContext) {
+    loadDriveLabRoute(
+      currentRouteContext.route,
+      currentRouteContext.startPlace,
+      currentRouteContext.destinationPlace,
+    );
+  }
 });
 
 saveApiKeyButton.addEventListener("click", () => {
@@ -609,6 +621,7 @@ function loadDriveLabRoute(route, startPlace, destinationPlace) {
   driveLabStatus.textContent = `Route loaded. Ready to preview ${driveLabFrames.length} Street View moments.`;
   driveLabProgress = 0;
   driveLabFrameIndex = 0;
+  lastStreetViewHeading = null;
   driveLabProgressBar.style.width = "0%";
   updateDriveLabUi();
 }
@@ -618,6 +631,7 @@ function clearDriveLabRoute() {
   driveLabFrames = [];
   driveLabProgress = 0;
   driveLabFrameIndex = 0;
+  lastStreetViewHeading = null;
 
   driveLabSummary.textContent =
     "This is our first step toward a real moving dry run. Build a route, then play it through Street View.";
@@ -639,6 +653,7 @@ async function startDriveLabPlayback() {
   if (driveLabFrameIndex >= driveLabFrames.length) {
     driveLabFrameIndex = 0;
     driveLabProgress = 0;
+    lastStreetViewHeading = null;
   }
 
   driveLabIsPlaying = true;
@@ -712,7 +727,7 @@ async function playDriveLabFrame() {
   driveLabFrameIndex += 1;
   driveLabTimer = window.setTimeout(() => {
     playDriveLabFrame();
-  }, 1800);
+  }, getDriveLabFrameDelay());
 }
 
 function updateDriveLabUi() {
@@ -733,7 +748,10 @@ function interpolateValue(start, end, amount) {
 
 function buildDriveLabFrames(route, startPlace, destinationPlace) {
   const routeCoordinates = route.geometry?.coordinates ?? [];
-  const sampledCoordinates = sampleRouteCoordinates(routeCoordinates, 8);
+  const sampledCoordinates = sampleRouteCoordinates(
+    routeCoordinates,
+    getDriveLabFrameCount(route.distance || 0),
+  );
   const frames = sampledCoordinates.map((coordinate, index, coordinates) => {
     const nextCoordinate =
       coordinates[Math.min(coordinates.length - 1, index + 1)] || [
@@ -771,16 +789,97 @@ function sampleRouteCoordinates(coordinates, sampleCount) {
     return coordinates;
   }
 
+  const totalDistance = measureCoordinatePath(coordinates);
+
+  if (!totalDistance) {
+    return coordinates.slice(0, sampleCount);
+  }
+
   const samples = [];
 
   for (let index = 0; index < sampleCount; index += 1) {
     const progress = index / Math.max(sampleCount - 1, 1);
-    const coordinateIndex = Math.round((coordinates.length - 1) * progress);
+    const targetDistance = totalDistance * progress;
 
-    samples.push(coordinates[coordinateIndex]);
+    samples.push(interpolateCoordinateAtDistance(coordinates, targetDistance));
   }
 
   return samples;
+}
+
+function measureCoordinatePath(coordinates) {
+  let totalDistance = 0;
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    totalDistance += coordinateDistance(coordinates[index - 1], coordinates[index]);
+  }
+
+  return totalDistance;
+}
+
+function interpolateCoordinateAtDistance(coordinates, targetDistance) {
+  if (targetDistance <= 0) {
+    return coordinates[0];
+  }
+
+  let traveledDistance = 0;
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const previousCoordinate = coordinates[index - 1];
+    const nextCoordinate = coordinates[index];
+    const segmentDistance = coordinateDistance(previousCoordinate, nextCoordinate);
+
+    if (traveledDistance + segmentDistance >= targetDistance) {
+      const remainingDistance = targetDistance - traveledDistance;
+      const mix = segmentDistance ? remainingDistance / segmentDistance : 0;
+
+      return [
+        interpolateValue(previousCoordinate[0], nextCoordinate[0], mix),
+        interpolateValue(previousCoordinate[1], nextCoordinate[1], mix),
+      ];
+    }
+
+    traveledDistance += segmentDistance;
+  }
+
+  return coordinates[coordinates.length - 1];
+}
+
+function coordinateDistance(startCoordinate, endCoordinate) {
+  return calculateDistanceMeters(
+    startCoordinate[1],
+    startCoordinate[0],
+    endCoordinate[1],
+    endCoordinate[0],
+  );
+}
+
+function getDriveLabFrameCount(routeDistanceMeters) {
+  const speed = driveSpeedSelect.value;
+
+  if (speed === "comfort") {
+    return clampValue(Math.round(routeDistanceMeters / 80), 14, 34);
+  }
+
+  if (speed === "quick") {
+    return clampValue(Math.round(routeDistanceMeters / 180), 8, 18);
+  }
+
+  return clampValue(Math.round(routeDistanceMeters / 120), 10, 24);
+}
+
+function getDriveLabFrameDelay() {
+  const speed = driveSpeedSelect.value;
+
+  if (speed === "comfort") {
+    return 1400;
+  }
+
+  if (speed === "quick") {
+    return 650;
+  }
+
+  return 950;
 }
 
 function streetViewFrameLabel(index, totalFrames) {
@@ -1345,13 +1444,18 @@ async function loadStreetViewPoint(point, isArrival) {
           point.headingTarget[0],
         )
       : 0;
+    const smoothedHeading =
+      lastStreetViewHeading == null
+        ? heading
+        : smoothHeading(lastStreetViewHeading, heading, 0.55);
 
     streetViewPanorama.setPano(panoramaData.location.pano);
     streetViewPanorama.setPov({
-      heading,
-      pitch: 0,
+      heading: smoothedHeading,
+      pitch: -4,
     });
     streetViewPanorama.setZoom(0);
+    lastStreetViewHeading = smoothedHeading;
 
     streetViewSummary.textContent = point.title;
     return true;
@@ -1620,6 +1724,16 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
       Math.cos(longitudeDelta);
 
   return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+}
+
+function smoothHeading(previousHeading, nextHeading, weight) {
+  const delta = ((((nextHeading - previousHeading) % 360) + 540) % 360) - 180;
+
+  return (previousHeading + delta * weight + 360) % 360;
+}
+
+function clampValue(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
