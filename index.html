@@ -20,14 +20,25 @@
       <section class="card">
         <h2>Try the idea</h2>
         <form id="route-form">
+          <div class="action-row">
+            <button type="button" class="secondary-button" id="locate-button">
+              Locate me
+            </button>
+            <p class="status" id="location-status">
+              Use your location to fill in nearby places.
+            </p>
+          </div>
+
           <label for="start">Starting from</label>
           <input
             id="start"
             name="start"
             type="text"
             placeholder="Home"
+            list="start-suggestions"
             required
           />
+          <datalist id="start-suggestions"></datalist>
 
           <label for="destination">Going to</label>
           <input
@@ -35,11 +46,21 @@
             name="destination"
             type="text"
             placeholder="Doctor's office"
+            list="destination-suggestions"
             required
           />
+          <datalist id="destination-suggestions"></datalist>
 
           <button type="submit">Preview dry run</button>
         </form>
+      </section>
+
+      <section class="card nearby-places">
+        <h2>Nearby suggestions</h2>
+        <p id="nearby-summary">
+          Tap "Locate me" and we will gather a few useful local destinations.
+        </p>
+        <div class="suggestion-list" id="suggestion-list"></div>
       </section>
 
       <section class="card result" id="result" aria-live="polite">
