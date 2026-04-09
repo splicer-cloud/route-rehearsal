@@ -10,6 +10,11 @@ const startSuggestions = document.querySelector("#start-suggestions");
 const destinationSuggestions = document.querySelector("#destination-suggestions");
 
 const nearbySearchRadiusMeters = 1800;
+const overpassEndpoints = [
+  "https://overpass-api.de/api/interpreter",
+  "https://lz4.overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
 
 locateButton.addEventListener("click", async () => {
   if (!navigator.geolocation) {
@@ -23,16 +28,35 @@ locateButton.addEventListener("click", async () => {
   try {
     const position = await getCurrentPosition();
     const { latitude, longitude } = position.coords;
-    const [locationLabel, nearbyPlaces] = await Promise.all([
+    const fallbackLocationLabel = formatCoordinatesLabel(latitude, longitude);
+    let locationLabel = fallbackLocationLabel;
+    let nearbyPlaces = [];
+
+    startInput.value = fallbackLocationLabel;
+    locationStatus.textContent = "Location found. Looking for nearby places...";
+    nearbySummary.textContent = "Checking your area for a few nearby destinations.";
+
+    const [locationResult, nearbyPlacesResult] = await Promise.allSettled([
       getLocationLabel(latitude, longitude),
       getNearbyPlaces(latitude, longitude),
     ]);
 
+    if (locationResult.status === "fulfilled") {
+      locationLabel = locationResult.value;
+    }
+
+    if (nearbyPlacesResult.status === "fulfilled") {
+      nearbyPlaces = nearbyPlacesResult.value;
+    }
+
     fillSuggestions(locationLabel, nearbyPlaces);
-    locationStatus.textContent = "Nearby places loaded from your location.";
+    locationStatus.textContent = nearbyPlaces.length
+      ? "Location found and nearby places loaded."
+      : "Location found. Nearby place suggestions are limited right now.";
   } catch (error) {
-    locationStatus.textContent =
-      "We could not load your nearby places. Please try again.";
+    locationStatus.textContent = getLocationErrorMessage(error);
+    nearbySummary.textContent =
+      "Location was not available yet. You can still type places manually.";
   } finally {
     locateButton.disabled = false;
   }
@@ -94,26 +118,44 @@ async function getLocationLabel(latitude, longitude) {
 }
 
 async function getNearbyPlaces(latitude, longitude) {
-  const response = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    body: `
-      [out:json][timeout:20];
-      (
-        node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["amenity"]["name"];
-        node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["shop"]["name"];
-        node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["tourism"]["name"];
-        node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["leisure"]["name"];
-        node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["highway"="parking"]["name"];
-      );
-      out body 20;
-    `.trim(),
-  });
+  const query = `
+    [out:json][timeout:20];
+    (
+      node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["amenity"]["name"];
+      node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["shop"]["name"];
+      node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["tourism"]["name"];
+      node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["leisure"]["name"];
+      node(around:${nearbySearchRadiusMeters},${latitude},${longitude})["highway"="parking"]["name"];
+    );
+    out body;
+  `.trim();
 
-  if (!response.ok) {
-    throw new Error("Nearby places lookup failed.");
+  let data = null;
+
+  for (const endpoint of overpassEndpoints) {
+    try {
+      const url = new URL(endpoint);
+
+      url.searchParams.set("data", query);
+
+      const response = await fetch(url, {
+        method: "GET",
+      });
+
+      if (!response.ok) {
+        continue;
+      }
+
+      data = await response.json();
+      break;
+    } catch (error) {
+      continue;
+    }
   }
 
-  const data = await response.json();
+  if (!data) {
+    return [];
+  }
 
   return (data.elements ?? [])
     .map((place) => ({
@@ -136,7 +178,8 @@ async function getNearbyPlaces(latitude, longitude) {
     .filter(
       (place, index, places) =>
         places.findIndex(
-          (otherPlace) => otherPlace.name.toLowerCase() === place.name.toLowerCase(),
+          (otherPlace) =>
+            otherPlace.name.toLowerCase() === place.name.toLowerCase(),
         ) === index,
     )
     .slice(0, 8);
@@ -144,7 +187,9 @@ async function getNearbyPlaces(latitude, longitude) {
 
 function fillSuggestions(locationLabel, nearbyPlaces) {
   startInput.value = locationLabel;
-  destinationInput.value = nearbyPlaces[0]?.name || "";
+  if (!destinationInput.value) {
+    destinationInput.value = nearbyPlaces[0]?.name || "";
+  }
 
   startSuggestions.innerHTML = "";
   destinationSuggestions.innerHTML = "";
@@ -152,6 +197,7 @@ function fillSuggestions(locationLabel, nearbyPlaces) {
 
   addSuggestionOption(startSuggestions, locationLabel);
   addSuggestionOption(startSuggestions, "Home");
+  addSuggestionOption(destinationSuggestions, "Home");
 
   nearbyPlaces.forEach((place) => {
     addSuggestionOption(startSuggestions, place.name);
@@ -161,7 +207,7 @@ function fillSuggestions(locationLabel, nearbyPlaces) {
 
   nearbySummary.textContent = nearbyPlaces.length
     ? "Pick one of these nearby places or type your own destination."
-    : "We found your location, but no nearby suggestions came back just yet.";
+    : "We found your location, but nearby place suggestions are limited right now.";
 }
 
 function addSuggestionOption(list, value) {
@@ -190,6 +236,26 @@ function formatDistance(distance) {
   }
 
   return `${(distance / 1000).toFixed(1)} km away`;
+}
+
+function formatCoordinatesLabel(latitude, longitude) {
+  return `Current location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
+}
+
+function getLocationErrorMessage(error) {
+  if (error?.code === 1) {
+    return "Location permission was denied. Please allow location access and try again.";
+  }
+
+  if (error?.code === 2) {
+    return "Your location could not be determined right now.";
+  }
+
+  if (error?.code === 3) {
+    return "Location lookup took too long. Please try again.";
+  }
+
+  return "We could not access your location yet. Please try again.";
 }
 
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
