@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Route Rehearsal</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -64,11 +69,29 @@
       </section>
 
       <section class="card result" id="result" aria-live="polite">
-        <h2>What the app will do</h2>
-        <p>Enter a route above to see the starter preview.</p>
+        <div class="result-header">
+          <div>
+            <h2>Your dry run</h2>
+            <p id="route-summary">
+              Enter a route above to see a calm preview of the drive.
+            </p>
+          </div>
+        </div>
+        <div class="route-map is-empty" id="route-map" role="img" aria-label="Route map">
+          <p class="placeholder-copy">Preparing your route map.</p>
+        </div>
+        <div class="route-steps" id="route-steps">
+          <p class="placeholder-copy">
+            We will highlight the route, key turns, and the final approach here.
+          </p>
+        </div>
       </section>
     </main>
 
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      crossorigin=""
+    ></script>
     <script src="app.js"></script>
   </body>
 </html>

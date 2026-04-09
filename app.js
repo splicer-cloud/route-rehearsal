@@ -1,5 +1,4 @@
 const form = document.querySelector("#route-form");
-const result = document.querySelector("#result");
 const locateButton = document.querySelector("#locate-button");
 const locationStatus = document.querySelector("#location-status");
 const nearbySummary = document.querySelector("#nearby-summary");
@@ -8,6 +7,10 @@ const startInput = document.querySelector("#start");
 const destinationInput = document.querySelector("#destination");
 const startSuggestions = document.querySelector("#start-suggestions");
 const destinationSuggestions = document.querySelector("#destination-suggestions");
+const routeMapElement = document.querySelector("#route-map");
+const routeSteps = document.querySelector("#route-steps");
+const routeSummary = document.querySelector("#route-summary");
+const submitButton = form.querySelector('button[type="submit"]');
 
 const nearbySearchRadiusMeters = 1800;
 const overpassEndpoints = [
@@ -15,6 +18,11 @@ const overpassEndpoints = [
   "https://lz4.overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
 ];
+
+let currentLocation = null;
+let routeMap = null;
+let routeLayer = null;
+let routeMarkers = [];
 
 locateButton.addEventListener("click", async () => {
   if (!navigator.geolocation) {
@@ -49,6 +57,12 @@ locateButton.addEventListener("click", async () => {
       nearbyPlaces = nearbyPlacesResult.value;
     }
 
+    currentLocation = {
+      label: locationLabel,
+      latitude,
+      longitude,
+    };
+
     fillSuggestions(locationLabel, nearbyPlaces);
     locationStatus.textContent = nearbyPlaces.length
       ? "Location found and nearby places loaded."
@@ -62,22 +76,50 @@ locateButton.addEventListener("click", async () => {
   }
 });
 
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const formData = new FormData(form);
   const start = formData.get("start")?.toString().trim();
   const destination = formData.get("destination")?.toString().trim();
 
-  result.innerHTML = `
-    <h2>Starter preview</h2>
-    <p><strong>From:</strong> ${start}</p>
-    <p><strong>To:</strong> ${destination}</p>
-    <p>
-      Next we will replace this placeholder with a real route, a map, and a calm
-      step-by-step preview of the most important moments along the drive.
+  if (!start || !destination) {
+    routeSummary.textContent = "Please enter both a start and a destination.";
+    return;
+  }
+
+  submitButton.disabled = true;
+  submitButton.textContent = "Building dry run...";
+  routeSummary.textContent = "Finding the route and building your preview...";
+  routeSteps.innerHTML = `
+    <p class="placeholder-copy">
+      Pulling together the map, drive summary, and key moments.
     </p>
   `;
+  setEmptyMapState("Preparing your route map.");
+
+  try {
+    const [startPlace, destinationPlace] = await Promise.all([
+      resolvePlace(start),
+      resolvePlace(destination),
+    ]);
+    const route = await getRoute(startPlace, destinationPlace);
+
+    renderRoute(route, startPlace, destinationPlace);
+  } catch (error) {
+    routeSummary.textContent =
+      error.message ||
+      "We could not build this route yet. Please try a slightly more specific place name.";
+    routeSteps.innerHTML = `
+      <p class="placeholder-copy">
+        Try entering a fuller address or a nearby landmark and then run it again.
+      </p>
+    `;
+    setEmptyMapState("We could not draw this route yet.");
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = "Preview dry run";
+  }
 });
 
 function getCurrentPosition() {
@@ -256,6 +298,288 @@ function getLocationErrorMessage(error) {
   }
 
   return "We could not access your location yet. Please try again.";
+}
+
+async function resolvePlace(query) {
+  if (currentLocation && query === currentLocation.label) {
+    return {
+      name: currentLocation.label,
+      latitude: currentLocation.latitude,
+      longitude: currentLocation.longitude,
+    };
+  }
+
+  const searchUrl = new URL("https://nominatim.openstreetmap.org/search");
+
+  searchUrl.searchParams.set("format", "jsonv2");
+  searchUrl.searchParams.set("limit", "1");
+  searchUrl.searchParams.set("q", query);
+
+  const response = await fetch(searchUrl);
+
+  if (!response.ok) {
+    throw new Error(`We could not look up "${query}" right now.`);
+  }
+
+  const results = await response.json();
+  const firstResult = results[0];
+
+  if (!firstResult) {
+    throw new Error(`We could not find "${query}". Try a fuller address.`);
+  }
+
+  return {
+    name: firstResult.display_name,
+    latitude: Number(firstResult.lat),
+    longitude: Number(firstResult.lon),
+  };
+}
+
+async function getRoute(startPlace, destinationPlace) {
+  const routeUrl = new URL(
+    `https://router.project-osrm.org/route/v1/driving/${startPlace.longitude},${startPlace.latitude};${destinationPlace.longitude},${destinationPlace.latitude}`,
+  );
+
+  routeUrl.searchParams.set("overview", "full");
+  routeUrl.searchParams.set("geometries", "geojson");
+  routeUrl.searchParams.set("steps", "true");
+
+  const response = await fetch(routeUrl);
+
+  if (!response.ok) {
+    throw new Error("We could not fetch a driving route right now.");
+  }
+
+  const data = await response.json();
+  const route = data.routes?.[0];
+
+  if (!route) {
+    throw new Error("No driving route came back for those two places.");
+  }
+
+  return route;
+}
+
+function renderRoute(route, startPlace, destinationPlace) {
+  const firstLeg = route.legs?.[0];
+  const allSteps = firstLeg?.steps ?? [];
+  const rehearsalSteps = selectRehearsalSteps(allSteps);
+
+  routeSummary.textContent = `From ${shortPlaceName(startPlace.name)} to ${shortPlaceName(destinationPlace.name)}. About ${formatDriveDuration(route.duration)} and ${formatDriveDistance(route.distance)}.`;
+
+  drawRouteMap(route, startPlace, destinationPlace);
+  renderRehearsalSteps(rehearsalSteps, destinationPlace);
+}
+
+function drawRouteMap(route, startPlace, destinationPlace) {
+  routeMapElement.classList.remove("is-empty");
+
+  if (!routeMap) {
+    routeMapElement.innerHTML = "";
+    routeMap = L.map(routeMapElement, {
+      scrollWheelZoom: false,
+    });
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(routeMap);
+  }
+
+  if (routeLayer) {
+    routeMap.removeLayer(routeLayer);
+  }
+
+  routeMarkers.forEach((marker) => routeMap.removeLayer(marker));
+  routeMarkers = [];
+
+  routeLayer = L.geoJSON(route.geometry, {
+    style: {
+      color: "#c96f4a",
+      weight: 6,
+      opacity: 0.9,
+    },
+  }).addTo(routeMap);
+
+  routeMarkers = [
+    L.marker([startPlace.latitude, startPlace.longitude])
+      .addTo(routeMap)
+      .bindPopup(`Start: ${shortPlaceName(startPlace.name)}`),
+    L.marker([destinationPlace.latitude, destinationPlace.longitude])
+      .addTo(routeMap)
+      .bindPopup(`Finish: ${shortPlaceName(destinationPlace.name)}`),
+  ];
+
+  routeMap.fitBounds(routeLayer.getBounds(), {
+    padding: [28, 28],
+  });
+}
+
+function renderRehearsalSteps(steps, destinationPlace) {
+  routeSteps.innerHTML = "";
+
+  if (!steps.length) {
+    routeSteps.innerHTML = `
+      <p class="placeholder-copy">
+        The route came back, but we did not get enough turn detail to build the dry run yet.
+      </p>
+    `;
+    return;
+  }
+
+  steps.forEach((step, index) => {
+    const card = document.createElement("article");
+    const label = document.createElement("p");
+    const title = document.createElement("h3");
+    const meta = document.createElement("p");
+
+    card.className = "step-card";
+    label.className = "step-label";
+    title.className = "step-title";
+    meta.className = "step-meta";
+
+    label.textContent = rehearsalLabel(index, steps.length);
+    title.textContent = buildStepInstruction(step, destinationPlace, index, steps.length);
+    meta.textContent = `${formatDriveDistance(step.distance)} on this segment`;
+
+    card.append(label, title, meta);
+    routeSteps.append(card);
+  });
+}
+
+function selectRehearsalSteps(steps) {
+  const significantTypes = new Set([
+    "depart",
+    "turn",
+    "new name",
+    "merge",
+    "fork",
+    "on ramp",
+    "off ramp",
+    "roundabout",
+    "rotary",
+    "exit roundabout",
+    "end of road",
+    "arrive",
+  ]);
+
+  const significantSteps = steps.filter((step) =>
+    significantTypes.has(step.maneuver?.type),
+  );
+  const firstPass = significantSteps.slice(0, 6);
+  let arrivalStep = null;
+
+  for (let index = significantSteps.length - 1; index >= 0; index -= 1) {
+    if (significantSteps[index].maneuver?.type === "arrive") {
+      arrivalStep = significantSteps[index];
+      break;
+    }
+  }
+
+  if (arrivalStep && !firstPass.includes(arrivalStep)) {
+    firstPass.push(arrivalStep);
+  }
+
+  return firstPass.length ? firstPass : steps.slice(0, 5);
+}
+
+function buildStepInstruction(step, destinationPlace, index, totalSteps) {
+  const type = step.maneuver?.type || "continue";
+  const modifier = step.maneuver?.modifier || "";
+  const roadName = step.name || "the road ahead";
+
+  if (type === "depart") {
+    return `Start out on ${roadName}.`;
+  }
+
+  if (type === "arrive" || index === totalSteps - 1) {
+    return `Arrive near ${shortPlaceName(destinationPlace.name)}.`;
+  }
+
+  if (type === "roundabout" || type === "rotary") {
+    return `Enter the roundabout and follow signs for ${roadName}.`;
+  }
+
+  if (type === "merge" || type === "fork") {
+    return `Stay ${modifier || "with the route"} and follow ${roadName}.`;
+  }
+
+  if (type === "on ramp" || type === "off ramp") {
+    return `Take the ${modifier || ""} ramp toward ${roadName}.`.replace(
+      /\s+/g,
+      " ",
+    ).trim();
+  }
+
+  if (type === "end of road") {
+    return `At the end of the road, turn ${modifier || "as directed"} onto ${roadName}.`;
+  }
+
+  if (type === "new name") {
+    return `Keep going as the road becomes ${roadName}.`;
+  }
+
+  if (modifier) {
+    return `Turn ${modifier} onto ${roadName}.`;
+  }
+
+  return `Continue on ${roadName}.`;
+}
+
+function rehearsalLabel(index, totalSteps) {
+  if (index === 0) {
+    return "Start";
+  }
+
+  if (index === totalSteps - 1) {
+    return "Arrival";
+  }
+
+  return `Moment ${index}`;
+}
+
+function formatDriveDistance(distanceMeters) {
+  const feet = distanceMeters * 3.28084;
+  const miles = distanceMeters / 1609.344;
+
+  if (feet < 750) {
+    return `${Math.round(feet)} ft`;
+  }
+
+  if (miles < 10) {
+    return `${miles.toFixed(1)} mi`;
+  }
+
+  return `${Math.round(miles)} mi`;
+}
+
+function formatDriveDuration(durationSeconds) {
+  const totalMinutes = Math.round(durationSeconds / 60);
+
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (!minutes) {
+    return `${hours} hr`;
+  }
+
+  return `${hours} hr ${minutes} min`;
+}
+
+function shortPlaceName(placeName) {
+  return placeName.split(",")[0];
+}
+
+function setEmptyMapState(message) {
+  if (routeMap) {
+    return;
+  }
+
+  routeMapElement.classList.add("is-empty");
+  routeMapElement.innerHTML = `<p class="placeholder-copy">${message}</p>`;
 }
 
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
