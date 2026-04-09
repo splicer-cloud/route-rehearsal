@@ -18,11 +18,16 @@ const overpassEndpoints = [
   "https://lz4.overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
 ];
+const locationStorageKey = "route-rehearsal:last-location";
 
 let currentLocation = null;
 let routeMap = null;
 let routeLayer = null;
 let routeMarkers = [];
+const knownPlaces = new Map();
+
+initializeRouteMap();
+restoreSavedLocation();
 
 locateButton.addEventListener("click", async () => {
   if (!navigator.geolocation) {
@@ -62,6 +67,7 @@ locateButton.addEventListener("click", async () => {
       latitude,
       longitude,
     };
+    saveLocation(currentLocation);
 
     fillSuggestions(locationLabel, nearbyPlaces);
     locationStatus.textContent = nearbyPlaces.length
@@ -96,10 +102,12 @@ form.addEventListener("submit", async (event) => {
       Pulling together the map, drive summary, and key moments.
     </p>
   `;
-  setEmptyMapState("Preparing your route map.");
+  resetMapView();
 
+  let startPlace = null;
+  let destinationPlace = null;
   try {
-    const [startPlace, destinationPlace] = await Promise.all([
+    [startPlace, destinationPlace] = await Promise.all([
       resolvePlace(start),
       resolvePlace(destination),
     ]);
@@ -107,6 +115,10 @@ form.addEventListener("submit", async (event) => {
 
     renderRoute(route, startPlace, destinationPlace);
   } catch (error) {
+    if (startPlace && destinationPlace) {
+      drawFallbackMap(startPlace, destinationPlace);
+    }
+
     routeSummary.textContent =
       error.message ||
       "We could not build this route yet. Please try a slightly more specific place name.";
@@ -115,7 +127,6 @@ form.addEventListener("submit", async (event) => {
         Try entering a fuller address or a nearby landmark and then run it again.
       </p>
     `;
-    setEmptyMapState("We could not draw this route yet.");
   } finally {
     submitButton.disabled = false;
     submitButton.textContent = "Preview dry run";
@@ -123,11 +134,32 @@ form.addEventListener("submit", async (event) => {
 });
 
 function getCurrentPosition() {
-  return new Promise((resolve, reject) => {
-    navigator.geolocation.getCurrentPosition(resolve, reject, {
-      enableHighAccuracy: true,
+  return tryGetPosition({
+    enableHighAccuracy: true,
+    timeout: 7000,
+    maximumAge: 120000,
+  }).catch((error) => {
+    if (error?.code === 1) {
+      throw error;
+    }
+
+    return tryGetPosition({
+      enableHighAccuracy: false,
       timeout: 10000,
-      maximumAge: 300000,
+      maximumAge: 600000,
+    }).catch((secondError) => {
+      const savedLocation = loadSavedLocation();
+
+      if (savedLocation) {
+        return {
+          coords: {
+            latitude: savedLocation.latitude,
+            longitude: savedLocation.longitude,
+          },
+        };
+      }
+
+      throw secondError;
     });
   });
 }
@@ -202,6 +234,8 @@ async function getNearbyPlaces(latitude, longitude) {
   return (data.elements ?? [])
     .map((place) => ({
       name: place.tags?.name,
+      latitude: place.lat,
+      longitude: place.lon,
       type:
         place.tags?.amenity ||
         place.tags?.shop ||
@@ -239,11 +273,16 @@ function fillSuggestions(locationLabel, nearbyPlaces) {
 
   addSuggestionOption(startSuggestions, locationLabel);
   addSuggestionOption(startSuggestions, "Home");
-  addSuggestionOption(destinationSuggestions, "Home");
+  registerKnownPlace(locationLabel, {
+    name: locationLabel,
+    latitude: currentLocation?.latitude,
+    longitude: currentLocation?.longitude,
+  });
 
   nearbyPlaces.forEach((place) => {
     addSuggestionOption(startSuggestions, place.name);
     addSuggestionOption(destinationSuggestions, place.name);
+    registerKnownPlace(place.name, place);
     suggestionList.append(createSuggestionChip(place.name, place));
   });
 
@@ -301,6 +340,16 @@ function getLocationErrorMessage(error) {
 }
 
 async function resolvePlace(query) {
+  const knownPlace = knownPlaces.get(normalizePlaceKey(query));
+
+  if (knownPlace?.latitude != null && knownPlace?.longitude != null) {
+    return {
+      name: knownPlace.name,
+      latitude: knownPlace.latitude,
+      longitude: knownPlace.longitude,
+    };
+  }
+
   if (currentLocation && query === currentLocation.label) {
     return {
       name: currentLocation.label,
@@ -372,25 +421,11 @@ function renderRoute(route, startPlace, destinationPlace) {
 }
 
 function drawRouteMap(route, startPlace, destinationPlace) {
-  routeMapElement.classList.remove("is-empty");
-
   if (!routeMap) {
-    routeMapElement.innerHTML = "";
-    routeMap = L.map(routeMapElement, {
-      scrollWheelZoom: false,
-    });
-
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    }).addTo(routeMap);
+    throw new Error("The map could not load in this browser.");
   }
 
-  if (routeLayer) {
-    routeMap.removeLayer(routeLayer);
-  }
-
-  routeMarkers.forEach((marker) => routeMap.removeLayer(marker));
-  routeMarkers = [];
+  clearMapLayers();
 
   routeLayer = L.geoJSON(route.geometry, {
     style: {
@@ -412,6 +447,7 @@ function drawRouteMap(route, startPlace, destinationPlace) {
   routeMap.fitBounds(routeLayer.getBounds(), {
     padding: [28, 28],
   });
+  requestMapResize();
 }
 
 function renderRehearsalSteps(steps, destinationPlace) {
@@ -573,13 +609,175 @@ function shortPlaceName(placeName) {
   return placeName.split(",")[0];
 }
 
-function setEmptyMapState(message) {
-  if (routeMap) {
+function initializeRouteMap() {
+  if (typeof window.L === "undefined") {
+    setEmptyMapMessage("The map library did not load yet.");
     return;
   }
 
+  routeMapElement.classList.remove("is-empty");
+  routeMapElement.innerHTML = "";
+  routeMap = L.map(routeMapElement, {
+    scrollWheelZoom: false,
+  });
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(routeMap);
+
+  routeMap.setView([39.5, -98.35], 4);
+  requestMapResize();
+}
+
+function resetMapView() {
+  if (!routeMap) {
+    setEmptyMapMessage("Preparing your route map.");
+    return;
+  }
+
+  clearMapLayers();
+  routeMap.setView([39.5, -98.35], 4);
+  requestMapResize();
+}
+
+function drawFallbackMap(startPlace, destinationPlace) {
+  if (!routeMap) {
+    setEmptyMapMessage("We found the places, but the route map is not available.");
+    return;
+  }
+
+  clearMapLayers();
+
+  routeLayer = L.polyline(
+    [
+      [startPlace.latitude, startPlace.longitude],
+      [destinationPlace.latitude, destinationPlace.longitude],
+    ],
+    {
+      color: "#9f4f2e",
+      weight: 4,
+      opacity: 0.7,
+      dashArray: "10 10",
+    },
+  ).addTo(routeMap);
+
+  routeMarkers = [
+    L.marker([startPlace.latitude, startPlace.longitude])
+      .addTo(routeMap)
+      .bindPopup(`Start: ${shortPlaceName(startPlace.name)}`),
+    L.marker([destinationPlace.latitude, destinationPlace.longitude])
+      .addTo(routeMap)
+      .bindPopup(`Finish: ${shortPlaceName(destinationPlace.name)}`),
+  ];
+
+  routeMap.fitBounds(routeLayer.getBounds(), {
+    padding: [28, 28],
+  });
+  requestMapResize();
+}
+
+function clearMapLayers() {
+  if (!routeMap) {
+    return;
+  }
+
+  if (routeLayer) {
+    routeMap.removeLayer(routeLayer);
+    routeLayer = null;
+  }
+
+  routeMarkers.forEach((marker) => routeMap.removeLayer(marker));
+  routeMarkers = [];
+}
+
+function setEmptyMapMessage(message) {
   routeMapElement.classList.add("is-empty");
   routeMapElement.innerHTML = `<p class="placeholder-copy">${message}</p>`;
+}
+
+function requestMapResize() {
+  if (!routeMap) {
+    return;
+  }
+
+  window.setTimeout(() => {
+    routeMap.invalidateSize();
+  }, 50);
+}
+
+function tryGetPosition(options) {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, options);
+  });
+}
+
+function normalizePlaceKey(value) {
+  return value.trim().toLowerCase();
+}
+
+function registerKnownPlace(label, place) {
+  if (
+    !label ||
+    place?.latitude == null ||
+    place?.longitude == null
+  ) {
+    return;
+  }
+
+  knownPlaces.set(normalizePlaceKey(label), {
+    name: place.name || label,
+    latitude: place.latitude,
+    longitude: place.longitude,
+  });
+}
+
+function saveLocation(location) {
+  try {
+    window.localStorage.setItem(locationStorageKey, JSON.stringify(location));
+  } catch (error) {
+    return;
+  }
+}
+
+function loadSavedLocation() {
+  try {
+    const savedValue = window.localStorage.getItem(locationStorageKey);
+
+    if (!savedValue) {
+      return null;
+    }
+
+    const parsedValue = JSON.parse(savedValue);
+
+    if (
+      parsedValue?.latitude == null ||
+      parsedValue?.longitude == null ||
+      !parsedValue?.label
+    ) {
+      return null;
+    }
+
+    return parsedValue;
+  } catch (error) {
+    return null;
+  }
+}
+
+function restoreSavedLocation() {
+  const savedLocation = loadSavedLocation();
+
+  if (!savedLocation) {
+    return;
+  }
+
+  currentLocation = savedLocation;
+  startInput.value = savedLocation.label;
+  registerKnownPlace(savedLocation.label, {
+    name: savedLocation.label,
+    latitude: savedLocation.latitude,
+    longitude: savedLocation.longitude,
+  });
+  locationStatus.textContent = "Using your last saved location until you refresh it.";
 }
 
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
