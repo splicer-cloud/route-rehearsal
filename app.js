@@ -558,8 +558,17 @@ function renderRoute(route, startPlace, destinationPlace) {
     destinationPlace,
     rehearsalSteps,
   };
-  renderStreetViewPoints(currentRouteContext);
   loadDriveLabRoute(route, startPlace, destinationPlace);
+
+  try {
+    renderStreetViewPoints(currentRouteContext);
+  } catch (error) {
+    streetViewSummary.textContent =
+      "The route loaded, but Street View preview needs another pass.";
+    setEmptyStreetViewMessage(
+      "Street View had a hiccup, but the route and Drive Lab are still ready.",
+    );
+  }
 }
 
 function drawRouteMap(route, startPlace, destinationPlace) {
@@ -627,7 +636,7 @@ function loadDriveLabRoute(route, startPlace, destinationPlace) {
 
   driveLabSummary.textContent =
     "Press play to move through the route like a guided dry run.";
-  driveLabStatus.textContent = `Ready to preview ${formatDriveDistance(route.distance)} of route.`;
+  driveLabStatus.textContent = `Route loaded. Ready to preview ${formatDriveDistance(route.distance)} of route.`;
   driveLabProgress = 0;
   driveLabLastTimestamp = 0;
   placeDriveLabMarkerAtProgress(0);
