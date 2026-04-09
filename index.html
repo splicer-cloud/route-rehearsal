@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Route Rehearsal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Version 1 starter</p>
+        <h1>Route Rehearsal</h1>
+        <p class="intro">
+          A tiny prototype for helping people feel more confident before driving
+          somewhere new.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Try the idea</h2>
+        <form id="route-form">
+          <label for="start">Starting from</label>
+          <input
+            id="start"
+            name="start"
+            type="text"
+            placeholder="Home"
+            required
+          />
+
+          <label for="destination">Going to</label>
+          <input
+            id="destination"
+            name="destination"
+            type="text"
+            placeholder="Doctor's office"
+            required
+          />
+
+          <button type="submit">Preview dry run</button>
+        </form>
+      </section>
+
+      <section class="card result" id="result" aria-live="polite">
+        <h2>What the app will do</h2>
+        <p>Enter a route above to see the starter preview.</p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
