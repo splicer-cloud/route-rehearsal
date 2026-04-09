@@ -17,6 +17,12 @@ const streetViewStage = document.querySelector("#street-view-stage");
 const googleMapsApiKeyInput = document.querySelector("#google-maps-api-key");
 const saveApiKeyButton = document.querySelector("#save-api-key");
 const streetViewKeyStatus = document.querySelector("#street-view-key-status");
+const driveLabSummary = document.querySelector("#drive-lab-summary");
+const drivePlayButton = document.querySelector("#drive-play");
+const drivePauseButton = document.querySelector("#drive-pause");
+const driveResetButton = document.querySelector("#drive-reset");
+const driveLabProgressBar = document.querySelector("#drive-lab-progress-bar");
+const driveLabStatus = document.querySelector("#drive-lab-status");
 
 const nearbySearchRadiusMeters = 1800;
 const overpassEndpoints = [
@@ -35,11 +41,30 @@ const knownPlaces = new Map();
 let currentRouteContext = null;
 let streetViewPanorama = null;
 let googleMapsLoaderPromise = null;
+let driveLabPolyline = [];
+let driveLabAnimationFrame = null;
+let driveLabMarker = null;
+let driveLabProgress = 0;
+let driveLabLastTimestamp = 0;
+let driveLabIsPlaying = false;
 
 initializeRouteMap();
 restoreSavedLocation();
 restoreGoogleMapsApiKey();
 updateStreetViewKeyStatus();
+updateDriveLabUi();
+
+drivePlayButton.addEventListener("click", () => {
+  startDriveLabPlayback();
+});
+
+drivePauseButton.addEventListener("click", () => {
+  pauseDriveLabPlayback();
+});
+
+driveResetButton.addEventListener("click", () => {
+  resetDriveLabPlayback();
+});
 
 saveApiKeyButton.addEventListener("click", () => {
   const apiKey = googleMapsApiKeyInput.value.trim();
@@ -154,6 +179,7 @@ form.addEventListener("submit", async (event) => {
 
     currentRouteContext = null;
     renderStreetViewPoints(null);
+    clearDriveLabRoute();
     routeSummary.textContent =
       error.message ||
       "We could not build this route yet. Please try a slightly more specific place name.";
@@ -533,11 +559,17 @@ function renderRoute(route, startPlace, destinationPlace) {
     rehearsalSteps,
   };
   renderStreetViewPoints(currentRouteContext);
+  loadDriveLabRoute(route, startPlace, destinationPlace);
 }
 
 function drawRouteMap(route, startPlace, destinationPlace) {
   if (!routeMap) {
     throw new Error("The map could not load in this browser.");
+  }
+
+  if (driveLabMarker) {
+    routeMap.removeLayer(driveLabMarker);
+    driveLabMarker = null;
   }
 
   clearMapLayers();
@@ -563,6 +595,167 @@ function drawRouteMap(route, startPlace, destinationPlace) {
     padding: [28, 28],
   });
   requestMapResize();
+}
+
+function loadDriveLabRoute(route, startPlace, destinationPlace) {
+  pauseDriveLabPlayback();
+
+  if (driveLabMarker && routeMap) {
+    routeMap.removeLayer(driveLabMarker);
+    driveLabMarker = null;
+  }
+
+  const coordinates = route.geometry?.coordinates ?? [];
+
+  driveLabPolyline = coordinates.map(([longitude, latitude]) => ({
+    latitude,
+    longitude,
+  }));
+
+  if (!driveLabPolyline.length) {
+    driveLabPolyline = [
+      {
+        latitude: startPlace.latitude,
+        longitude: startPlace.longitude,
+      },
+      {
+        latitude: destinationPlace.latitude,
+        longitude: destinationPlace.longitude,
+      },
+    ];
+  }
+
+  driveLabSummary.textContent =
+    "Press play to move through the route like a guided dry run.";
+  driveLabStatus.textContent = `Ready to preview ${formatDriveDistance(route.distance)} of route.`;
+  driveLabProgress = 0;
+  driveLabLastTimestamp = 0;
+  placeDriveLabMarkerAtProgress(0);
+  updateDriveLabUi();
+}
+
+function clearDriveLabRoute() {
+  pauseDriveLabPlayback();
+  driveLabPolyline = [];
+  driveLabProgress = 0;
+  driveLabLastTimestamp = 0;
+
+  if (driveLabMarker && routeMap) {
+    routeMap.removeLayer(driveLabMarker);
+    driveLabMarker = null;
+  }
+
+  driveLabSummary.textContent =
+    "This is our first step toward a real moving dry run. Build a route, then play it.";
+  driveLabStatus.textContent = "No route loaded yet.";
+  updateDriveLabUi();
+}
+
+function startDriveLabPlayback() {
+  if (!driveLabPolyline.length) {
+    return;
+  }
+
+  if (driveLabProgress >= 1) {
+    driveLabProgress = 0;
+    placeDriveLabMarkerAtProgress(0);
+  }
+
+  driveLabIsPlaying = true;
+  driveLabStatus.textContent = "Driving the route preview...";
+  updateDriveLabUi();
+  driveLabAnimationFrame = window.requestAnimationFrame(stepDriveLabPlayback);
+}
+
+function pauseDriveLabPlayback() {
+  driveLabIsPlaying = false;
+
+  if (driveLabAnimationFrame) {
+    window.cancelAnimationFrame(driveLabAnimationFrame);
+    driveLabAnimationFrame = null;
+  }
+
+  driveLabLastTimestamp = 0;
+  updateDriveLabUi();
+}
+
+function resetDriveLabPlayback() {
+  pauseDriveLabPlayback();
+  driveLabProgress = 0;
+  placeDriveLabMarkerAtProgress(0);
+  driveLabStatus.textContent = driveLabPolyline.length
+    ? "Route reset and ready to play again."
+    : "No route loaded yet.";
+  updateDriveLabUi();
+}
+
+function stepDriveLabPlayback(timestamp) {
+  if (!driveLabIsPlaying) {
+    return;
+  }
+
+  if (!driveLabLastTimestamp) {
+    driveLabLastTimestamp = timestamp;
+  }
+
+  const delta = timestamp - driveLabLastTimestamp;
+  const progressStep = delta / 18000;
+
+  driveLabLastTimestamp = timestamp;
+  driveLabProgress = Math.min(1, driveLabProgress + progressStep);
+  placeDriveLabMarkerAtProgress(driveLabProgress);
+
+  if (driveLabProgress >= 1) {
+    pauseDriveLabPlayback();
+    driveLabStatus.textContent = "Dry run complete. Reset to watch again.";
+    updateDriveLabUi();
+    return;
+  }
+
+  driveLabAnimationFrame = window.requestAnimationFrame(stepDriveLabPlayback);
+}
+
+function placeDriveLabMarkerAtProgress(progress) {
+  if (!driveLabPolyline.length || !routeMap) {
+    return;
+  }
+
+  const index = Math.min(
+    driveLabPolyline.length - 1,
+    Math.round((driveLabPolyline.length - 1) * progress),
+  );
+  const point = driveLabPolyline[index];
+
+  if (!driveLabMarker) {
+    driveLabMarker = L.circleMarker([point.latitude, point.longitude], {
+      radius: 9,
+      color: "#1e293b",
+      weight: 2,
+      fillColor: "#c96f4a",
+      fillOpacity: 1,
+    }).addTo(routeMap);
+  } else {
+    driveLabMarker.setLatLng([point.latitude, point.longitude]);
+  }
+
+  routeMap.panTo([point.latitude, point.longitude], {
+    animate: true,
+    duration: 0.25,
+  });
+
+  driveLabProgressBar.style.width = `${Math.round(progress * 100)}%`;
+}
+
+function updateDriveLabUi() {
+  const hasRoute = driveLabPolyline.length > 0;
+
+  drivePlayButton.disabled = !hasRoute || driveLabIsPlaying;
+  drivePauseButton.disabled = !hasRoute || !driveLabIsPlaying;
+  driveResetButton.disabled = !hasRoute;
+
+  if (!hasRoute) {
+    driveLabProgressBar.style.width = "0%";
+  }
 }
 
 function renderRehearsalSteps(steps, destinationPlace) {
