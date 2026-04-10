@@ -25,6 +25,7 @@ let playbackActive = false;
 restoreApiKey();
 loadSavedRoute();
 updatePlaybackUi();
+checkCesiumAvailability();
 
 saveTilesKeyButton.addEventListener("click", () => {
   const apiKey = tilesApiKeyInput.value.trim();
@@ -97,6 +98,12 @@ function loadSavedRoute() {
 }
 
 async function loadScene() {
+  if (typeof window.Cesium === "undefined") {
+    playbackStatus.textContent =
+      "The 3D engine did not load. Refresh the page and try again.";
+    return;
+  }
+
   const apiKey = loadApiKey();
 
   if (!apiKey) {
@@ -111,27 +118,28 @@ async function loadScene() {
     return;
   }
 
-  if (!viewer) {
-    Cesium.Ion.defaultAccessToken = "";
-    Cesium.RequestScheduler.requestsByServer["tile.googleapis.com:443"] = 18;
-
-    viewer = new Cesium.Viewer("three-drive-view", {
-      animation: false,
-      timeline: false,
-      baseLayerPicker: false,
-      geocoder: false,
-      homeButton: false,
-      sceneModePicker: false,
-      navigationHelpButton: false,
-      selectionIndicator: false,
-      requestRenderMode: true,
-      imageryProvider: false,
-    });
-
-    viewer.scene.globe.show = false;
-  }
-
   try {
+    if (!viewer) {
+      Cesium.Ion.defaultAccessToken = "";
+      Cesium.RequestScheduler.requestsByServer["tile.googleapis.com:443"] = 18;
+
+      viewer = new Cesium.Viewer("three-drive-view", {
+        animation: false,
+        timeline: false,
+        baseLayerPicker: false,
+        geocoder: false,
+        homeButton: false,
+        sceneModePicker: false,
+        navigationHelpButton: false,
+        selectionIndicator: false,
+        requestRenderMode: true,
+        imageryProvider: false,
+      });
+
+      viewer.scene.globe.show = false;
+      viewer.scene.requestRender();
+    }
+
     if (!tileset) {
       tileset = viewer.scene.primitives.add(
         new Cesium.Cesium3DTileset({
@@ -148,7 +156,7 @@ async function loadScene() {
       "3D scene loaded. Press play to ride the route.";
   } catch (error) {
     playbackStatus.textContent =
-      "The 3D scene did not load. Check the Map Tiles API key and settings.";
+      "The 3D scene did not load. Check the Map Tiles API key, Map Tiles API access, and refresh once.";
   }
 }
 
@@ -220,6 +228,9 @@ function stepPlayback() {
 
   flyCameraToProgress(playbackProgress);
   progressBar.style.width = `${Math.round(playbackProgress * 100)}%`;
+  playbackStatus.textContent = `Playing smooth 3D route preview... ${Math.round(
+    playbackProgress * 100,
+  )}%`;
 
   if (playbackProgress >= 1) {
     pausePlayback();
@@ -252,14 +263,15 @@ function flyCameraToProgress(progress) {
     destination: Cesium.Cartesian3.fromDegrees(
       currentCoordinate[0],
       currentCoordinate[1],
-      80,
+      55,
     ),
     orientation: {
       heading: Cesium.Math.toRadians(heading),
-      pitch: Cesium.Math.toRadians(-12),
+      pitch: Cesium.Math.toRadians(-8),
       roll: 0,
     },
   });
+  viewer.scene.requestRender();
 }
 
 function interpolateRouteCoordinate(coordinates, progress) {
@@ -315,6 +327,16 @@ function updatePlaybackUi() {
   playButton.disabled = !hasScene || !hasRoute || playbackActive;
   pauseButton.disabled = !playbackActive;
   resetButton.disabled = !hasScene || !hasRoute;
+}
+
+function checkCesiumAvailability() {
+  if (typeof window.Cesium !== "undefined") {
+    return;
+  }
+
+  playbackStatus.textContent =
+    "The 3D engine did not load yet. Refresh the page before trying the 3D ride.";
+  loadSceneButton.disabled = true;
 }
 
 function shortPlaceName(placeName) {
