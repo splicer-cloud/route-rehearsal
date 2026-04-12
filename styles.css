@@ -24,6 +24,35 @@ body {
     linear-gradient(180deg, #f8f2ea 0%, var(--bg) 100%);
 }
 
+.page-switcher {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: 10px;
+  width: min(1280px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 16px 0 0;
+}
+
+.page-switcher-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 250, 243, 0.92);
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: 0 10px 30px rgba(77, 57, 40, 0.06);
+}
+
+.page-switcher-link.is-current {
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  color: #fff8f2;
+  border-color: transparent;
+}
+
 .page {
   width: min(720px, calc(100% - 32px));
   margin: 0 auto;

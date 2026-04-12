@@ -5,6 +5,7 @@ const tilesApiKeyInput = document.querySelector("#tiles-api-key");
 const saveTilesKeyButton = document.querySelector("#save-tiles-key");
 const tilesKeyStatus = document.querySelector("#tiles-key-status");
 const routeStatus = document.querySelector("#three-drive-route-status");
+const reloadRouteButton = document.querySelector("#three-drive-reload-route");
 const loadSceneButton = document.querySelector("#three-drive-load-scene");
 const playButton = document.querySelector("#three-drive-play");
 const pauseButton = document.querySelector("#three-drive-pause");
@@ -19,7 +20,7 @@ let routeEntity = null;
 let routePayload = null;
 let playbackPoints = [];
 let playbackProgress = 0;
-let playbackTimer = null;
+let playbackFrame = null;
 let playbackActive = false;
 
 restoreApiKey();
@@ -42,6 +43,16 @@ saveTilesKeyButton.addEventListener("click", () => {
 
 loadSceneButton.addEventListener("click", async () => {
   await loadScene();
+});
+
+reloadRouteButton.addEventListener("click", () => {
+  loadSavedRoute();
+  if (viewer && routePayload?.route?.geometry?.coordinates?.length) {
+    playbackPoints = routePayload.route.geometry.coordinates;
+    drawRouteLine();
+    resetPlayback();
+  }
+  updatePlaybackUi();
 });
 
 playButton.addEventListener("click", () => {
@@ -128,6 +139,7 @@ async function loadScene() {
         timeline: false,
         baseLayerPicker: false,
         geocoder: false,
+        globe: false,
         homeButton: false,
         sceneModePicker: false,
         navigationHelpButton: false,
@@ -135,8 +147,6 @@ async function loadScene() {
         requestRenderMode: true,
         imageryProvider: false,
       });
-
-      viewer.scene.globe.show = false;
       viewer.scene.requestRender();
     }
 
@@ -198,9 +208,9 @@ function startPlayback() {
 function pausePlayback() {
   playbackActive = false;
 
-  if (playbackTimer) {
-    window.clearTimeout(playbackTimer);
-    playbackTimer = null;
+  if (playbackFrame) {
+    window.cancelAnimationFrame(playbackFrame);
+    playbackFrame = null;
   }
 
   updatePlaybackUi();
@@ -238,8 +248,8 @@ function stepPlayback() {
     return;
   }
 
-  playbackProgress = Math.min(1, playbackProgress + 0.01);
-  playbackTimer = window.setTimeout(stepPlayback, 90);
+  playbackProgress = Math.min(1, playbackProgress + 0.0025);
+  playbackFrame = window.requestAnimationFrame(stepPlayback);
 }
 
 function flyCameraToProgress(progress) {
@@ -263,11 +273,11 @@ function flyCameraToProgress(progress) {
     destination: Cesium.Cartesian3.fromDegrees(
       currentCoordinate[0],
       currentCoordinate[1],
-      55,
+      38,
     ),
     orientation: {
       heading: Cesium.Math.toRadians(heading),
-      pitch: Cesium.Math.toRadians(-8),
+      pitch: Cesium.Math.toRadians(-6),
       roll: 0,
     },
   });

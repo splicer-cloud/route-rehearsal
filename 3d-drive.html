@@ -5,13 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Route Rehearsal 3D Drive</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.105/Build/Cesium/Cesium.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/cesiumjs/1.105/Build/Cesium/Cesium.js"></script>
     <link
-      href="https://cesium.com/downloads/cesiumjs/releases/1.105/Build/Cesium/Widgets/widgets.css"
+      href="https://ajax.googleapis.com/ajax/libs/cesiumjs/1.105/Build/Cesium/Widgets/widgets.css"
       rel="stylesheet"
     />
   </head>
   <body>
+    <nav class="page-switcher" aria-label="Page switcher">
+      <a class="page-switcher-link" href="index.html">Route Rehearsal</a>
+      <a class="page-switcher-link is-current" href="3d-drive.html">3D Drive Prototype</a>
+    </nav>
     <main class="page page-wide">
       <section class="hero">
         <p class="eyebrow">Version 2 lab</p>
@@ -44,6 +48,9 @@
           <p class="status" id="three-drive-route-status">
             Return to the main app, build a route, then come back here.
           </p>
+          <button type="button" class="secondary-button" id="three-drive-reload-route">
+            Reload saved route
+          </button>
 
           <div class="drive-lab-controls">
             <button type="button" id="three-drive-load-scene">Load 3D scene</button>
