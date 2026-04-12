@@ -19,9 +19,14 @@ let tileset = null;
 let routeEntity = null;
 let routePayload = null;
 let playbackPoints = [];
+let ridePoints = [];
 let playbackProgress = 0;
 let playbackFrame = null;
 let playbackActive = false;
+let playbackStartedAt = 0;
+let playbackDuration = 26000;
+let lastCameraHeading = null;
+let routePrepared = false;
 
 restoreApiKey();
 loadSavedRoute();
@@ -45,12 +50,13 @@ loadSceneButton.addEventListener("click", async () => {
   await loadScene();
 });
 
-reloadRouteButton.addEventListener("click", () => {
+reloadRouteButton.addEventListener("click", async () => {
   loadSavedRoute();
+  routePrepared = false;
   if (viewer && routePayload?.route?.geometry?.coordinates?.length) {
     playbackPoints = routePayload.route.geometry.coordinates;
     drawRouteLine();
-    resetPlayback();
+    await prepareStreetLevelRide();
   }
   updatePlaybackUi();
 });
@@ -98,6 +104,8 @@ function loadSavedRoute() {
 
     routePayload = JSON.parse(savedRoute);
     playbackPoints = routePayload.route?.geometry?.coordinates ?? [];
+    ridePoints = [];
+    routePrepared = false;
     routeStatus.textContent = `Loaded route from ${shortPlaceName(routePayload.startPlace.name)} to ${shortPlaceName(routePayload.destinationPlace.name)}.`;
     playbackStatus.textContent =
       "Load the 3D scene, then play the camera ride.";
@@ -144,10 +152,10 @@ async function loadScene() {
         sceneModePicker: false,
         navigationHelpButton: false,
         selectionIndicator: false,
-        requestRenderMode: true,
+        requestRenderMode: false,
         imageryProvider: false,
       });
-      viewer.scene.requestRender();
+      viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
     }
 
     if (!tileset) {
@@ -161,9 +169,9 @@ async function loadScene() {
     }
 
     drawRouteLine();
-    resetPlayback();
+    await prepareStreetLevelRide();
     playbackStatus.textContent =
-      "3D scene loaded. Press play to ride the route.";
+      "3D scene prepared. Press play for the street-level ride.";
   } catch (error) {
     playbackStatus.textContent =
       "The 3D scene did not load. Check the Map Tiles API key, Map Tiles API access, and refresh once.";
@@ -180,7 +188,7 @@ function drawRouteLine() {
   }
 
   const positions = routePayload.route.geometry.coordinates.map(([longitude, latitude]) =>
-    Cesium.Cartesian3.fromDegrees(longitude, latitude, 30),
+    Cesium.Cartesian3.fromDegrees(longitude, latitude, 4),
   );
 
   routeEntity = viewer.entities.add({
@@ -195,14 +203,17 @@ function drawRouteLine() {
 }
 
 function startPlayback() {
-  if (!viewer || !playbackPoints.length) {
+  if (!viewer || !ridePoints.length || !routePrepared) {
+    playbackStatus.textContent =
+      "Load and prepare the 3D scene before playing the ride.";
     return;
   }
 
   playbackActive = true;
-  playbackStatus.textContent = "Playing smooth 3D route preview...";
+  playbackStartedAt = performance.now() - playbackProgress * playbackDuration;
+  playbackStatus.textContent = "Playing street-level 3D route preview...";
   updatePlaybackUi();
-  stepPlayback();
+  playbackFrame = window.requestAnimationFrame(stepPlayback);
 }
 
 function pausePlayback() {
@@ -219,26 +230,28 @@ function pausePlayback() {
 function resetPlayback() {
   pausePlayback();
   playbackProgress = 0;
+  lastCameraHeading = null;
   progressBar.style.width = "0%";
 
-  if (playbackPoints.length) {
+  if (ridePoints.length) {
     flyCameraToProgress(0);
   }
 
   playbackStatus.textContent = viewer
-    ? "3D scene loaded. Press play to ride the route."
+    ? "3D scene prepared. Press play for the street-level ride."
     : "The 3D ride is waiting for a loaded scene and route.";
   updatePlaybackUi();
 }
 
-function stepPlayback() {
-  if (!playbackActive || !playbackPoints.length) {
+function stepPlayback(timestamp) {
+  if (!playbackActive || !ridePoints.length) {
     return;
   }
 
+  playbackProgress = Math.min(1, (timestamp - playbackStartedAt) / playbackDuration);
   flyCameraToProgress(playbackProgress);
   progressBar.style.width = `${Math.round(playbackProgress * 100)}%`;
-  playbackStatus.textContent = `Playing smooth 3D route preview... ${Math.round(
+  playbackStatus.textContent = `Playing street-level 3D route preview... ${Math.round(
     playbackProgress * 100,
   )}%`;
 
@@ -248,40 +261,39 @@ function stepPlayback() {
     return;
   }
 
-  playbackProgress = Math.min(1, playbackProgress + 0.0025);
   playbackFrame = window.requestAnimationFrame(stepPlayback);
 }
 
 function flyCameraToProgress(progress) {
-  if (!viewer || !playbackPoints.length) {
+  if (!viewer || !ridePoints.length) {
     return;
   }
 
-  const currentCoordinate = interpolateRouteCoordinate(playbackPoints, progress);
-  const nextCoordinate = interpolateRouteCoordinate(
-    playbackPoints,
-    Math.min(1, progress + 0.01),
-  );
+  const currentPoint = interpolateRidePoint(ridePoints, progress);
+  const nextPoint = interpolateRidePoint(ridePoints, Math.min(1, progress + 0.018));
   const heading = calculateBearing(
-    currentCoordinate[1],
-    currentCoordinate[0],
-    nextCoordinate[1],
-    nextCoordinate[0],
+    currentPoint.latitude,
+    currentPoint.longitude,
+    nextPoint.latitude,
+    nextPoint.longitude,
   );
+  const smoothedHeading =
+    lastCameraHeading == null ? heading : smoothHeading(lastCameraHeading, heading, 0.28);
+  const height = currentPoint.height + 2.8;
 
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(
-      currentCoordinate[0],
-      currentCoordinate[1],
-      38,
+      currentPoint.longitude,
+      currentPoint.latitude,
+      height,
     ),
     orientation: {
-      heading: Cesium.Math.toRadians(heading),
-      pitch: Cesium.Math.toRadians(-6),
+      heading: Cesium.Math.toRadians(smoothedHeading),
+      pitch: Cesium.Math.toRadians(-2.5),
       roll: 0,
     },
   });
-  viewer.scene.requestRender();
+  lastCameraHeading = smoothedHeading;
 }
 
 function interpolateRouteCoordinate(coordinates, progress) {
@@ -300,6 +312,234 @@ function interpolateRouteCoordinate(coordinates, progress) {
     interpolateValue(startCoordinate[0], endCoordinate[0], mix),
     interpolateValue(startCoordinate[1], endCoordinate[1], mix),
   ];
+}
+
+async function prepareStreetLevelRide() {
+  if (!viewer || !routePayload?.route?.geometry?.coordinates?.length) {
+    return;
+  }
+
+  playbackStatus.textContent =
+    "Preparing street-level ride and warming up nearby 3D tiles...";
+  routePrepared = false;
+  playbackPoints = routePayload.route.geometry.coordinates;
+  ridePoints = buildEvenlySpacedRoutePoints(playbackPoints, 160);
+  playbackDuration = clampValue(ridePoints.length * 150, 22000, 46000);
+
+  await preloadRideTiles(ridePoints);
+  ridePoints = ridePoints.map((point) => ({
+    ...point,
+    height: getSceneHeight(point.latitude, point.longitude),
+  }));
+  routePrepared = true;
+  resetPlayback();
+}
+
+async function preloadRideTiles(points) {
+  const preloadPoints = sampleRidePoints(points, 10);
+
+  for (const point of preloadPoints) {
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(
+        point.longitude,
+        point.latitude,
+        95,
+      ),
+      orientation: {
+        heading: Cesium.Math.toRadians(point.heading),
+        pitch: Cesium.Math.toRadians(-35),
+        roll: 0,
+      },
+    });
+    await waitForTilesToSettle(900);
+  }
+}
+
+function waitForTilesToSettle(timeoutMs) {
+  return new Promise((resolve) => {
+    let settledFrames = 0;
+    const startedAt = performance.now();
+
+    function check() {
+      const pendingTiles = tileset?.statistics?.numberOfPendingRequests || 0;
+      const processingTiles = tileset?.statistics?.numberProcessing || 0;
+
+      if (!pendingTiles && !processingTiles) {
+        settledFrames += 1;
+      } else {
+        settledFrames = 0;
+      }
+
+      if (settledFrames >= 2 || performance.now() - startedAt > timeoutMs) {
+        resolve();
+        return;
+      }
+
+      window.requestAnimationFrame(check);
+    }
+
+    check();
+  });
+}
+
+function buildEvenlySpacedRoutePoints(coordinates, pointCount) {
+  if (!coordinates.length) {
+    return [];
+  }
+
+  const measuredDistance = measureCoordinatePath(coordinates);
+
+  if (!measuredDistance) {
+    return coordinates.map(([longitude, latitude]) => ({
+      latitude,
+      longitude,
+      heading: 0,
+      height: 20,
+    }));
+  }
+
+  const points = [];
+
+  for (let index = 0; index < pointCount; index += 1) {
+    const progress = index / Math.max(pointCount - 1, 1);
+    const coordinate = interpolateCoordinateAtDistance(
+      coordinates,
+      measuredDistance * progress,
+    );
+    const nextCoordinate = interpolateCoordinateAtDistance(
+      coordinates,
+      measuredDistance * Math.min(1, progress + 0.01),
+    );
+
+    points.push({
+      latitude: coordinate[1],
+      longitude: coordinate[0],
+      heading: calculateBearing(
+        coordinate[1],
+        coordinate[0],
+        nextCoordinate[1],
+        nextCoordinate[0],
+      ),
+      height: 20,
+    });
+  }
+
+  return points;
+}
+
+function sampleRidePoints(points, sampleCount) {
+  if (points.length <= sampleCount) {
+    return points;
+  }
+
+  const samples = [];
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const pointIndex = Math.round(
+      (points.length - 1) * (index / Math.max(sampleCount - 1, 1)),
+    );
+
+    samples.push(points[pointIndex]);
+  }
+
+  return samples;
+}
+
+function interpolateRidePoint(points, progress) {
+  if (points.length === 1) {
+    return points[0];
+  }
+
+  const scaledIndex = (points.length - 1) * progress;
+  const lowerIndex = Math.floor(scaledIndex);
+  const upperIndex = Math.min(points.length - 1, lowerIndex + 1);
+  const mix = scaledIndex - lowerIndex;
+  const startPoint = points[lowerIndex];
+  const endPoint = points[upperIndex];
+
+  return {
+    latitude: interpolateValue(startPoint.latitude, endPoint.latitude, mix),
+    longitude: interpolateValue(startPoint.longitude, endPoint.longitude, mix),
+    height: interpolateValue(startPoint.height, endPoint.height, mix),
+    heading: interpolateValue(startPoint.heading, endPoint.heading, mix),
+  };
+}
+
+function getSceneHeight(latitude, longitude) {
+  if (!viewer?.scene?.sampleHeight) {
+    return 20;
+  }
+
+  const cartographic = Cesium.Cartographic.fromDegrees(longitude, latitude);
+  const sampledHeight = viewer.scene.sampleHeight(cartographic);
+
+  if (Number.isFinite(sampledHeight)) {
+    return sampledHeight;
+  }
+
+  return 20;
+}
+
+function measureCoordinatePath(coordinates) {
+  let totalDistance = 0;
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    totalDistance += coordinateDistance(coordinates[index - 1], coordinates[index]);
+  }
+
+  return totalDistance;
+}
+
+function interpolateCoordinateAtDistance(coordinates, targetDistance) {
+  if (targetDistance <= 0) {
+    return coordinates[0];
+  }
+
+  let traveledDistance = 0;
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const previousCoordinate = coordinates[index - 1];
+    const nextCoordinate = coordinates[index];
+    const segmentDistance = coordinateDistance(previousCoordinate, nextCoordinate);
+
+    if (traveledDistance + segmentDistance >= targetDistance) {
+      const remainingDistance = targetDistance - traveledDistance;
+      const mix = segmentDistance ? remainingDistance / segmentDistance : 0;
+
+      return [
+        interpolateValue(previousCoordinate[0], nextCoordinate[0], mix),
+        interpolateValue(previousCoordinate[1], nextCoordinate[1], mix),
+      ];
+    }
+
+    traveledDistance += segmentDistance;
+  }
+
+  return coordinates[coordinates.length - 1];
+}
+
+function coordinateDistance(startCoordinate, endCoordinate) {
+  return calculateDistanceMeters(
+    startCoordinate[1],
+    startCoordinate[0],
+    endCoordinate[1],
+    endCoordinate[0],
+  );
+}
+
+function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+  const earthRadius = 6371000;
+  const latitudeDelta = toRadians(lat2 - lat1);
+  const longitudeDelta = toRadians(lon2 - lon1);
+  const a =
+    Math.sin(latitudeDelta / 2) * Math.sin(latitudeDelta / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(longitudeDelta / 2) *
+      Math.sin(longitudeDelta / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadius * c;
 }
 
 function interpolateValue(start, end, amount) {
@@ -322,6 +562,16 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   return (toDegrees(Math.atan2(y, x)) + 360) % 360;
 }
 
+function smoothHeading(previousHeading, nextHeading, weight) {
+  const delta = ((((nextHeading - previousHeading) % 360) + 540) % 360) - 180;
+
+  return (previousHeading + delta * weight + 360) % 360;
+}
+
+function clampValue(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
 function toRadians(value) {
   return (value * Math.PI) / 180;
 }
@@ -334,7 +584,7 @@ function updatePlaybackUi() {
   const hasScene = Boolean(viewer);
   const hasRoute = Boolean(routePayload?.route?.geometry?.coordinates?.length);
 
-  playButton.disabled = !hasScene || !hasRoute || playbackActive;
+  playButton.disabled = !hasScene || !hasRoute || !routePrepared || playbackActive;
   pauseButton.disabled = !playbackActive;
   resetButton.disabled = !hasScene || !hasRoute;
 }
