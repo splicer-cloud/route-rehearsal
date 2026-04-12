@@ -26,7 +26,16 @@ let playbackActive = false;
 let playbackStartedAt = 0;
 let playbackDuration = 26000;
 let lastCameraHeading = null;
+let lastCameraHeight = null;
 let routePrepared = false;
+
+const ridePointSpacingMeters = 7;
+const minimumRidePoints = 220;
+const maximumRidePoints = 520;
+const cameraEyeHeightMeters = 2.6;
+const streetPreloadHeightMeters = 10;
+const aerialPreloadHeightMeters = 3500;
+const maximumComfortGrade = 0.095;
 
 restoreApiKey();
 loadSavedRoute();
@@ -108,7 +117,7 @@ function loadSavedRoute() {
     routePrepared = false;
     routeStatus.textContent = `Loaded route from ${shortPlaceName(routePayload.startPlace.name)} to ${shortPlaceName(routePayload.destinationPlace.name)}.`;
     playbackStatus.textContent =
-      "Load the 3D scene, then play the camera ride.";
+      "Prepare the high-res ride, then play the camera preview.";
   } catch (error) {
     routePayload = null;
     routeStatus.textContent =
@@ -140,7 +149,7 @@ async function loadScene() {
   try {
     if (!viewer) {
       Cesium.Ion.defaultAccessToken = "";
-      Cesium.RequestScheduler.requestsByServer["tile.googleapis.com:443"] = 18;
+      Cesium.RequestScheduler.requestsByServer["tile.googleapis.com:443"] = 28;
 
       viewer = new Cesium.Viewer("three-drive-view", {
         animation: false,
@@ -155,6 +164,13 @@ async function loadScene() {
         requestRenderMode: false,
         imageryProvider: false,
       });
+      viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, 1.6);
+      if (viewer.scene.postProcessStages?.fxaa) {
+        viewer.scene.postProcessStages.fxaa.enabled = true;
+      }
+      if ("msaaSamples" in viewer.scene) {
+        viewer.scene.msaaSamples = 4;
+      }
       viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
     }
 
@@ -162,16 +178,24 @@ async function loadScene() {
       tileset = viewer.scene.primitives.add(
         new Cesium.Cesium3DTileset({
           url: `https://tile.googleapis.com/v1/3dtiles/root.json?key=${encodeURIComponent(apiKey)}`,
+          cullRequestsWhileMoving: false,
+          dynamicScreenSpaceError: false,
+          foveatedScreenSpaceError: false,
+          maximumScreenSpaceError: 2,
+          preferLeaves: true,
+          preloadFlightDestinations: true,
+          preloadWhenHidden: true,
           showCreditsOnScreen: true,
         }),
       );
       await tileset.readyPromise;
+      tuneTilesetForRideQuality(tileset);
     }
 
     drawRouteLine();
     await prepareStreetLevelRide();
     playbackStatus.textContent =
-      "3D scene prepared. Press play for the street-level ride.";
+      "High-res ride prepared. Press play for the street-level preview.";
   } catch (error) {
     playbackStatus.textContent =
       "The 3D scene did not load. Check the Map Tiles API key, Map Tiles API access, and refresh once.";
@@ -205,7 +229,7 @@ function drawRouteLine() {
 function startPlayback() {
   if (!viewer || !ridePoints.length || !routePrepared) {
     playbackStatus.textContent =
-      "Load and prepare the 3D scene before playing the ride.";
+      "Prepare the high-res ride before playing the preview.";
     return;
   }
 
@@ -231,14 +255,15 @@ function resetPlayback() {
   pausePlayback();
   playbackProgress = 0;
   lastCameraHeading = null;
+  lastCameraHeight = null;
   progressBar.style.width = "0%";
 
   if (ridePoints.length) {
-    flyCameraToProgress(0);
+    flyCameraToProgress(0, true);
   }
 
   playbackStatus.textContent = viewer
-    ? "3D scene prepared. Press play for the street-level ride."
+    ? "High-res ride prepared. Press play for the street-level preview."
     : "The 3D ride is waiting for a loaded scene and route.";
   updatePlaybackUi();
 }
@@ -264,7 +289,7 @@ function stepPlayback(timestamp) {
   playbackFrame = window.requestAnimationFrame(stepPlayback);
 }
 
-function flyCameraToProgress(progress) {
+function flyCameraToProgress(progress, snapCamera = false) {
   if (!viewer || !ridePoints.length) {
     return;
   }
@@ -279,7 +304,11 @@ function flyCameraToProgress(progress) {
   );
   const smoothedHeading =
     lastCameraHeading == null ? heading : smoothHeading(lastCameraHeading, heading, 0.28);
-  const height = currentPoint.height + 2.8;
+  const targetHeight = currentPoint.height + cameraEyeHeightMeters;
+  const height =
+    snapCamera || lastCameraHeight == null
+      ? targetHeight
+      : smoothCameraHeight(lastCameraHeight, targetHeight);
 
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(
@@ -289,11 +318,12 @@ function flyCameraToProgress(progress) {
     ),
     orientation: {
       heading: Cesium.Math.toRadians(smoothedHeading),
-      pitch: Cesium.Math.toRadians(-2.5),
+      pitch: Cesium.Math.toRadians(-1.4),
       roll: 0,
     },
   });
   lastCameraHeading = smoothedHeading;
+  lastCameraHeight = height;
 }
 
 function interpolateRouteCoordinate(coordinates, progress) {
@@ -320,38 +350,69 @@ async function prepareStreetLevelRide() {
   }
 
   playbackStatus.textContent =
-    "Preparing street-level ride and warming up nearby 3D tiles...";
+    "Preparing ride: loading the route corridor from above...";
   routePrepared = false;
   playbackPoints = routePayload.route.geometry.coordinates;
-  ridePoints = buildEvenlySpacedRoutePoints(playbackPoints, 160);
-  playbackDuration = clampValue(ridePoints.length * 150, 22000, 46000);
+  const routeDistance = measureCoordinatePath(playbackPoints);
+  const ridePointCount = clampValue(
+    Math.round(routeDistance / ridePointSpacingMeters),
+    minimumRidePoints,
+    maximumRidePoints,
+  );
 
-  await preloadRideTiles(ridePoints);
-  ridePoints = ridePoints.map((point) => ({
-    ...point,
-    height: getSceneHeight(point.latitude, point.longitude),
-  }));
+  ridePoints = buildEvenlySpacedRoutePoints(playbackPoints, ridePointCount);
+  playbackDuration = clampValue(routeDistance * 42, 28000, 72000);
+
+  await preloadAerialRouteTiles(ridePoints);
+  playbackStatus.textContent =
+    "Preparing ride: sampling and smoothing the road surface...";
+  ridePoints = await addSmoothedRoadHeights(ridePoints);
+  playbackStatus.textContent =
+    "Preparing ride: warming the low street-level camera path...";
+  await preloadStreetRideTiles(ridePoints);
   routePrepared = true;
   resetPlayback();
 }
 
-async function preloadRideTiles(points) {
-  const preloadPoints = sampleRidePoints(points, 10);
+async function preloadAerialRouteTiles(points) {
+  const preloadPoints = sampleRidePoints(points, 14);
 
-  for (const point of preloadPoints) {
+  for (const [index, point] of preloadPoints.entries()) {
+    playbackStatus.textContent = `Preparing ride: loading the route corridor ${index + 1}/${preloadPoints.length}...`;
     viewer.camera.setView({
       destination: Cesium.Cartesian3.fromDegrees(
         point.longitude,
         point.latitude,
-        95,
+        aerialPreloadHeightMeters,
       ),
       orientation: {
         heading: Cesium.Math.toRadians(point.heading),
-        pitch: Cesium.Math.toRadians(-35),
+        pitch: Cesium.Math.toRadians(-48),
         roll: 0,
       },
     });
-    await waitForTilesToSettle(900);
+    await waitForTilesToSettle(1150);
+  }
+}
+
+async function preloadStreetRideTiles(points) {
+  const preloadPoints = sampleRidePoints(points, 22);
+
+  for (const [index, point] of preloadPoints.entries()) {
+    playbackStatus.textContent = `Preparing ride: warming street-level detail ${index + 1}/${preloadPoints.length}...`;
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(
+        point.longitude,
+        point.latitude,
+        point.height + streetPreloadHeightMeters,
+      ),
+      orientation: {
+        heading: Cesium.Math.toRadians(point.heading),
+        pitch: Cesium.Math.toRadians(-4),
+        roll: 0,
+      },
+    });
+    await waitForTilesToSettle(750);
   }
 }
 
@@ -393,6 +454,7 @@ function buildEvenlySpacedRoutePoints(coordinates, pointCount) {
     return coordinates.map(([longitude, latitude]) => ({
       latitude,
       longitude,
+      distance: 0,
       heading: 0,
       height: 20,
     }));
@@ -414,6 +476,7 @@ function buildEvenlySpacedRoutePoints(coordinates, pointCount) {
     points.push({
       latitude: coordinate[1],
       longitude: coordinate[0],
+      distance: measuredDistance * progress,
       heading: calculateBearing(
         coordinate[1],
         coordinate[0],
@@ -460,8 +523,236 @@ function interpolateRidePoint(points, progress) {
   return {
     latitude: interpolateValue(startPoint.latitude, endPoint.latitude, mix),
     longitude: interpolateValue(startPoint.longitude, endPoint.longitude, mix),
+    distance: interpolateValue(startPoint.distance, endPoint.distance, mix),
     height: interpolateValue(startPoint.height, endPoint.height, mix),
     heading: interpolateValue(startPoint.heading, endPoint.heading, mix),
+  };
+}
+
+async function addSmoothedRoadHeights(points) {
+  const candidateHeights = await sampleRouteSurfaceHeights(points);
+  const smoothedHeights = buildSmoothedRoadProfile(points, candidateHeights);
+
+  return points.map((point, index) => ({
+    ...point,
+    height: smoothedHeights[index],
+  }));
+}
+
+async function sampleRouteSurfaceHeights(points) {
+  const offsets = [0, -3.2, 3.2];
+  const samples = [];
+
+  points.forEach((point, pointIndex) => {
+    offsets.forEach((offset) => {
+      const coordinate = offset
+        ? offsetCoordinateByMeters(
+            point.latitude,
+            point.longitude,
+            point.heading + (offset > 0 ? 90 : -90),
+            Math.abs(offset),
+          )
+        : point;
+
+      samples.push({
+        pointIndex,
+        offset,
+        cartographic: Cesium.Cartographic.fromDegrees(
+          coordinate.longitude,
+          coordinate.latitude,
+        ),
+      });
+    });
+  });
+
+  const heightsByPoint = points.map(() => []);
+  const chunkSize = 90;
+
+  for (let index = 0; index < samples.length; index += chunkSize) {
+    const chunk = samples.slice(index, index + chunkSize);
+    playbackStatus.textContent = `Preparing ride: sampling road height ${Math.min(
+      samples.length,
+      index + chunkSize,
+    )}/${samples.length}...`;
+    const heights = await sampleCartographicHeights(
+      chunk.map((sample) => sample.cartographic),
+    );
+
+    heights.forEach((height, heightIndex) => {
+      const sample = chunk[heightIndex];
+      heightsByPoint[sample.pointIndex].push({
+        height,
+        isCenter: sample.offset === 0,
+      });
+    });
+  }
+
+  return heightsByPoint.map((heights) => chooseRoadHeight(heights));
+}
+
+async function sampleCartographicHeights(cartographics) {
+  if (viewer?.scene?.sampleHeightMostDetailed) {
+    try {
+      const detailedCartographics =
+        await viewer.scene.sampleHeightMostDetailed(cartographics);
+
+      return detailedCartographics.map((cartographic) =>
+        Number.isFinite(cartographic.height) ? cartographic.height : null,
+      );
+    } catch (error) {
+      // Fall through to the immediate sampler. It is less detailed, but keeps the ride usable.
+    }
+  }
+
+  return cartographics.map((cartographic) => {
+    const sampledHeight = getSceneHeight(
+      Cesium.Math.toDegrees(cartographic.latitude),
+      Cesium.Math.toDegrees(cartographic.longitude),
+    );
+
+    return Number.isFinite(sampledHeight) ? sampledHeight : null;
+  });
+}
+
+function chooseRoadHeight(samples) {
+  const finiteSamples = samples
+    .filter((sample) => Number.isFinite(sample.height))
+    .sort((first, second) => first.height - second.height);
+
+  if (!finiteSamples.length) {
+    return null;
+  }
+
+  const centerSample = finiteSamples.find((sample) => sample.isCenter);
+
+  if (centerSample) {
+    return centerSample.height;
+  }
+
+  const medianHeight = finiteSamples[Math.floor(finiteSamples.length / 2)].height;
+
+  return medianHeight;
+}
+
+function buildSmoothedRoadProfile(points, rawHeights) {
+  const filledHeights = fillMissingHeights(rawHeights);
+  const despikedHeights = rejectHeightSpikes(filledHeights);
+  const averagedHeights = movingAverageHeights(despikedHeights, 4);
+  const gradeLimitedHeights = limitRoadGrade(points, averagedHeights);
+
+  return movingAverageHeights(gradeLimitedHeights, 5);
+}
+
+function fillMissingHeights(heights) {
+  const firstFiniteHeight = heights.find((height) => Number.isFinite(height)) ?? 20;
+  const filledHeights = [...heights];
+  let previousHeight = firstFiniteHeight;
+
+  for (let index = 0; index < filledHeights.length; index += 1) {
+    if (Number.isFinite(filledHeights[index])) {
+      previousHeight = filledHeights[index];
+    } else {
+      filledHeights[index] = previousHeight;
+    }
+  }
+
+  let nextHeight = previousHeight;
+
+  for (let index = filledHeights.length - 1; index >= 0; index -= 1) {
+    if (Number.isFinite(heights[index])) {
+      nextHeight = heights[index];
+    } else {
+      filledHeights[index] = nextHeight;
+    }
+  }
+
+  return filledHeights;
+}
+
+function rejectHeightSpikes(heights) {
+  return heights.map((height, index) => {
+    const windowStart = Math.max(0, index - 3);
+    const windowEnd = Math.min(heights.length, index + 4);
+    const localHeights = heights.slice(windowStart, windowEnd).sort((a, b) => a - b);
+    const localMedian = localHeights[Math.floor(localHeights.length / 2)];
+
+    return Math.abs(height - localMedian) > 4.5 ? localMedian : height;
+  });
+}
+
+function movingAverageHeights(heights, radius) {
+  return heights.map((height, index) => {
+    let weightedHeight = 0;
+    let totalWeight = 0;
+
+    for (
+      let sampleIndex = Math.max(0, index - radius);
+      sampleIndex <= Math.min(heights.length - 1, index + radius);
+      sampleIndex += 1
+    ) {
+      const weight = radius + 1 - Math.abs(index - sampleIndex);
+      weightedHeight += heights[sampleIndex] * weight;
+      totalWeight += weight;
+    }
+
+    return totalWeight ? weightedHeight / totalWeight : height;
+  });
+}
+
+function limitRoadGrade(points, heights) {
+  const forwardLimitedHeights = [...heights];
+
+  for (let index = 1; index < forwardLimitedHeights.length; index += 1) {
+    const segmentDistance = Math.max(1, points[index].distance - points[index - 1].distance);
+    const maximumChange = Math.max(0.45, segmentDistance * maximumComfortGrade);
+
+    forwardLimitedHeights[index] = clampValue(
+      forwardLimitedHeights[index],
+      forwardLimitedHeights[index - 1] - maximumChange,
+      forwardLimitedHeights[index - 1] + maximumChange,
+    );
+  }
+
+  const backwardLimitedHeights = [...forwardLimitedHeights];
+
+  for (let index = backwardLimitedHeights.length - 2; index >= 0; index -= 1) {
+    const segmentDistance = Math.max(1, points[index + 1].distance - points[index].distance);
+    const maximumChange = Math.max(0.45, segmentDistance * maximumComfortGrade);
+
+    backwardLimitedHeights[index] = clampValue(
+      backwardLimitedHeights[index],
+      backwardLimitedHeights[index + 1] - maximumChange,
+      backwardLimitedHeights[index + 1] + maximumChange,
+    );
+  }
+
+  return backwardLimitedHeights;
+}
+
+function offsetCoordinateByMeters(latitude, longitude, bearing, distanceMeters) {
+  const angularDistance = distanceMeters / 6371000;
+  const bearingRadians = toRadians((bearing + 360) % 360);
+  const latitudeRadians = toRadians(latitude);
+  const longitudeRadians = toRadians(longitude);
+  const shiftedLatitude = Math.asin(
+    Math.sin(latitudeRadians) * Math.cos(angularDistance) +
+      Math.cos(latitudeRadians) *
+        Math.sin(angularDistance) *
+        Math.cos(bearingRadians),
+  );
+  const shiftedLongitude =
+    longitudeRadians +
+    Math.atan2(
+      Math.sin(bearingRadians) *
+        Math.sin(angularDistance) *
+        Math.cos(latitudeRadians),
+      Math.cos(angularDistance) -
+        Math.sin(latitudeRadians) * Math.sin(shiftedLatitude),
+    );
+
+  return {
+    latitude: toDegrees(shiftedLatitude),
+    longitude: toDegrees(shiftedLongitude),
   };
 }
 
@@ -562,10 +853,39 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   return (toDegrees(Math.atan2(y, x)) + 360) % 360;
 }
 
+function smoothCameraHeight(previousHeight, nextHeight) {
+  const easedHeight = interpolateValue(previousHeight, nextHeight, 0.14);
+  const maximumFrameChange = 0.22;
+
+  return clampValue(
+    easedHeight,
+    previousHeight - maximumFrameChange,
+    previousHeight + maximumFrameChange,
+  );
+}
+
 function smoothHeading(previousHeading, nextHeading, weight) {
   const delta = ((((nextHeading - previousHeading) % 360) + 540) % 360) - 180;
 
   return (previousHeading + delta * weight + 360) % 360;
+}
+
+function tuneTilesetForRideQuality(targetTileset) {
+  targetTileset.maximumScreenSpaceError = 2;
+  targetTileset.dynamicScreenSpaceError = false;
+  targetTileset.foveatedScreenSpaceError = false;
+
+  if ("maximumMemoryUsage" in targetTileset) {
+    targetTileset.maximumMemoryUsage = 1536;
+  }
+
+  if ("cacheBytes" in targetTileset) {
+    targetTileset.cacheBytes = 1536 * 1024 * 1024;
+  }
+
+  if ("maximumCacheOverflowBytes" in targetTileset) {
+    targetTileset.maximumCacheOverflowBytes = 512 * 1024 * 1024;
+  }
 }
 
 function clampValue(value, minimum, maximum) {
