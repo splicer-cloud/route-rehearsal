@@ -200,7 +200,7 @@ button:hover {
 }
 
 .route-map {
-  min-height: 320px;
+  min-height: 520px;
   margin-bottom: 18px;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -242,6 +242,7 @@ button:hover {
 }
 
 .street-view-stage {
+  position: relative;
   min-height: 320px;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -251,11 +252,47 @@ button:hover {
     #f7f1ea;
 }
 
+.street-view-stage.is-loading::after {
+  content: attr(data-loading-label);
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 4;
+  padding: 9px 12px;
+  border: 1px solid rgba(88, 62, 39, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 253, 249, 0.92);
+  box-shadow: 0 12px 28px rgba(54, 39, 26, 0.16);
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
 .street-view-stage.is-empty {
   display: grid;
   place-items: center;
   padding: 24px;
   text-align: center;
+}
+
+.drive-lab-card {
+  border-color: rgba(201, 111, 74, 0.34);
+  background:
+    radial-gradient(circle at top left, rgba(201, 111, 74, 0.12), transparent 34%),
+    #fffdf9;
+}
+
+.drive-lab-card h2::after {
+  content: "HD";
+  display: inline-grid;
+  place-items: center;
+  margin-left: 10px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #1f2b22;
+  color: #fffdf9;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  vertical-align: middle;
 }
 
 .three-drive-layout {

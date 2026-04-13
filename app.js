@@ -49,6 +49,7 @@ let driveLabProgress = 0;
 let driveLabFrameIndex = 0;
 let driveLabIsPlaying = false;
 let lastStreetViewHeading = null;
+const streetViewDataCache = new Map();
 
 initializeRouteMap();
 restoreSavedLocation();
@@ -619,8 +620,8 @@ function loadDriveLabRoute(route, startPlace, destinationPlace) {
   driveLabFrames = buildDriveLabFrames(route, startPlace, destinationPlace);
 
   driveLabSummary.textContent =
-    "Press play to step through the drive in Street View.";
-  driveLabStatus.textContent = `Route loaded. Ready to preview ${driveLabFrames.length} Street View moments.`;
+    "Press play for the sharper HD Street View dry run.";
+  driveLabStatus.textContent = `Route loaded. Ready to preview ${driveLabFrames.length} HD Street View moments.`;
   driveLabProgress = 0;
   driveLabFrameIndex = 0;
   lastStreetViewHeading = null;
@@ -636,7 +637,7 @@ function clearDriveLabRoute() {
   lastStreetViewHeading = null;
 
   driveLabSummary.textContent =
-    "This is our first step toward a real moving dry run. Build a route, then play it through Street View.";
+    "This is the sharper fallback when 3D mesh imagery is too blurry. Build a route, then play it through HD Street View.";
   driveLabStatus.textContent = "No route loaded yet.";
   driveLabProgressBar.style.width = "0%";
   updateDriveLabUi();
@@ -659,9 +660,10 @@ async function startDriveLabPlayback() {
   }
 
   driveLabIsPlaying = true;
-  driveLabSummary.textContent = "Playing a Street View dry run of the route.";
-  driveLabStatus.textContent = "Starting Street View playback...";
+  driveLabSummary.textContent = "Playing the sharper HD Street View dry run.";
+  driveLabStatus.textContent = "Preparing the first Street View moments...";
   updateDriveLabUi();
+  await warmUpcomingStreetViewFrames(0);
   await playDriveLabFrame();
 }
 
@@ -699,7 +701,7 @@ async function playDriveLabFrame() {
 
   driveLabProgress = driveLabFrameIndex / lastFrameIndex;
   driveLabProgressBar.style.width = `${Math.round(driveLabProgress * 100)}%`;
-  driveLabStatus.textContent = `Previewing ${frame.label.toLowerCase()}... ${Math.round(
+  driveLabStatus.textContent = `Previewing ${frame.label.toLowerCase()} in HD Street View... ${Math.round(
     driveLabProgress * 100,
   )}%`;
 
@@ -727,6 +729,7 @@ async function playDriveLabFrame() {
   }
 
   driveLabFrameIndex += 1;
+  warmUpcomingStreetViewFrames(driveLabFrameIndex);
   driveLabTimer = window.setTimeout(() => {
     playDriveLabFrame();
   }, getDriveLabFrameDelay());
@@ -860,28 +863,28 @@ function getDriveLabFrameCount(routeDistanceMeters) {
   const speed = driveSpeedSelect.value;
 
   if (speed === "comfort") {
-    return clampValue(Math.round(routeDistanceMeters / 80), 14, 34);
+    return clampValue(Math.round(routeDistanceMeters / 38), 22, 72);
   }
 
   if (speed === "quick") {
-    return clampValue(Math.round(routeDistanceMeters / 180), 8, 18);
+    return clampValue(Math.round(routeDistanceMeters / 95), 12, 34);
   }
 
-  return clampValue(Math.round(routeDistanceMeters / 120), 10, 24);
+  return clampValue(Math.round(routeDistanceMeters / 60), 16, 52);
 }
 
 function getDriveLabFrameDelay() {
   const speed = driveSpeedSelect.value;
 
   if (speed === "comfort") {
-    return 1400;
+    return 1050;
   }
 
   if (speed === "quick") {
-    return 650;
+    return 520;
   }
 
-  return 950;
+  return 760;
 }
 
 function streetViewFrameLabel(index, totalFrames) {
@@ -1405,44 +1408,25 @@ function buildStreetViewPoints(routeContext) {
 
 async function loadStreetViewPoint(point, isArrival) {
   streetViewSummary.textContent = `Loading Street View for ${point.label.toLowerCase()}...`;
-  setEmptyStreetViewMessage("Loading Street View...");
+  setStreetViewLoadingMessage("Loading sharp Street View...");
 
   try {
-    await ensureGoogleMapsLoaded();
-    const streetViewLibrary = await window.google.maps.importLibrary("streetView");
-    const { StreetViewService, StreetViewPanorama } = streetViewLibrary;
-    const streetViewService = new StreetViewService();
-    const pointLocation = {
-      lat: point.latitude,
-      lng: point.longitude,
-    };
-
-    const panoramaData = await new Promise((resolve, reject) => {
-      streetViewService.getPanorama(
-        {
-          location: pointLocation,
-          radius: isArrival ? 80 : 50,
-        },
-        (data, status) => {
-          if (status === window.google.maps.StreetViewStatus.OK) {
-            resolve(data);
-            return;
-          }
-
-          reject(new Error("No nearby Street View imagery was found."));
-        },
-      );
-    });
+    const { StreetViewPanorama } = await getStreetViewLibrary();
+    const panoramaData = await getStreetViewPanoramaData(point, isArrival);
 
     streetViewStage.classList.remove("is-empty");
+    streetViewStage.classList.remove("is-loading");
+    streetViewStage.removeAttribute("data-loading-label");
 
     if (!streetViewPanorama) {
       streetViewStage.innerHTML = "";
       streetViewPanorama = new StreetViewPanorama(streetViewStage, {
         addressControl: false,
         fullscreenControl: false,
+        linksControl: false,
         motionTracking: false,
         motionTrackingControl: false,
+        panControl: false,
         showRoadLabels: true,
         zoomControl: true,
       });
@@ -1465,9 +1449,9 @@ async function loadStreetViewPoint(point, isArrival) {
     streetViewPanorama.setPano(panoramaData.location.pano);
     streetViewPanorama.setPov({
       heading: smoothedHeading,
-      pitch: -4,
+      pitch: -2,
     });
-    streetViewPanorama.setZoom(0);
+    streetViewPanorama.setZoom(1);
     lastStreetViewHeading = smoothedHeading;
 
     streetViewSummary.textContent = point.title;
@@ -1476,11 +1460,93 @@ async function loadStreetViewPoint(point, isArrival) {
     streetViewSummary.textContent =
       error.message ||
       "Street View could not load for this point right now.";
-    setEmptyStreetViewMessage(
-      "Street View did not load for this point. Try another point or check the API key restrictions.",
-    );
+    if (!streetViewPanorama) {
+      setEmptyStreetViewMessage(
+        "Street View did not load for this point. Try another point or check the API key restrictions.",
+      );
+    } else {
+      streetViewStage.classList.remove("is-loading");
+      streetViewStage.removeAttribute("data-loading-label");
+    }
     return false;
   }
+}
+
+async function warmUpcomingStreetViewFrames(startIndex) {
+  if (!hasGoogleMapsApiKey() || !driveLabFrames.length) {
+    return;
+  }
+
+  const upcomingFrames = driveLabFrames.slice(startIndex, startIndex + 5);
+
+  await Promise.allSettled(
+    upcomingFrames.map((frame, index) =>
+      getStreetViewPanoramaData(frame, startIndex + index >= driveLabFrames.length - 1),
+    ),
+  );
+}
+
+async function getStreetViewPanoramaData(point, isArrival) {
+  const cacheKey = getStreetViewCacheKey(point, isArrival);
+
+  if (streetViewDataCache.has(cacheKey)) {
+    return streetViewDataCache.get(cacheKey);
+  }
+
+  const streetViewLibrary = await getStreetViewLibrary();
+  const { StreetViewService, StreetViewPreference, StreetViewSource } =
+    streetViewLibrary;
+  const streetViewService = new StreetViewService();
+  const pointLocation = {
+    lat: point.latitude,
+    lng: point.longitude,
+  };
+  const request = {
+    location: pointLocation,
+    radius: isArrival ? 110 : 75,
+  };
+
+  if (StreetViewPreference?.NEAREST) {
+    request.preference = StreetViewPreference.NEAREST;
+  }
+
+  if (StreetViewSource?.OUTDOOR) {
+    request.source = StreetViewSource.OUTDOOR;
+  }
+
+  const panoramaDataPromise = new Promise((resolve, reject) => {
+    streetViewService.getPanorama(
+      request,
+      (data, status) => {
+        if (status === window.google.maps.StreetViewStatus.OK) {
+          resolve(data);
+          return;
+        }
+
+        reject(new Error("No nearby Street View imagery was found."));
+      },
+    );
+  });
+
+  streetViewDataCache.set(cacheKey, panoramaDataPromise);
+  panoramaDataPromise.catch(() => {
+    streetViewDataCache.delete(cacheKey);
+  });
+  return panoramaDataPromise;
+}
+
+async function getStreetViewLibrary() {
+  await ensureGoogleMapsLoaded();
+  return window.google.maps.importLibrary("streetView");
+}
+
+function getStreetViewCacheKey(point, isArrival) {
+  return [
+    point.label,
+    point.latitude.toFixed(5),
+    point.longitude.toFixed(5),
+    isArrival ? "arrival" : "route",
+  ].join(":");
 }
 
 function ensureGoogleMapsLoaded() {
@@ -1524,8 +1590,20 @@ function ensureGoogleMapsLoaded() {
 
 function setEmptyStreetViewMessage(message) {
   streetViewStage.classList.add("is-empty");
+  streetViewStage.classList.remove("is-loading");
+  streetViewStage.removeAttribute("data-loading-label");
   streetViewStage.innerHTML = `<p class="placeholder-copy">${message}</p>`;
   streetViewPanorama = null;
+}
+
+function setStreetViewLoadingMessage(message) {
+  if (!streetViewPanorama) {
+    setEmptyStreetViewMessage(message);
+    return;
+  }
+
+  streetViewStage.classList.add("is-loading");
+  streetViewStage.dataset.loadingLabel = message;
 }
 
 async function getGoogleLocationLabel(latitude, longitude) {
